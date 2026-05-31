@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Runtime logs
+logs/*.log
+dist/logs/*.log
+
+# Build outputs
+build/
+dist/
+*.spec.log
+
+# Large generated research datasets
+analysis/**/*.csv
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
