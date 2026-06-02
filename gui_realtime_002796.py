@@ -10,29 +10,47 @@ import asyncio
 import threading
 import queue
 import csv
+import json
 from datetime import datetime, timedelta
 import customtkinter as ctk
 
 from combined_strategy_v5 import CombinedStrategyV5
-from strategy_core import PositionMode
+from data_quality import RealtimeDataQualityMonitor, has_critical_issue
+from strategy_core import PositionMode, TradeRecord
 
 SYMBOL_CODE = "sz002796"
 SYMBOL_NAME = "世嘉科技"
 DATA_DIR = os.path.join("data", "sz002796")
+CONFIG_FILE = os.environ.get("LIVE_CONFIG_FILE", os.path.join(DATA_DIR, "live_config.json"))
+STATE_FILE = os.path.join(DATA_DIR, f"{SYMBOL_CODE}_strategy_state.json")
+TRADE_LOG_FILE = os.path.join(DATA_DIR, f"{SYMBOL_CODE}_strategy_trades.csv")
 FETCH_INTERVAL = 3.0  # 3 seconds
+STATE_SAVE_INTERVAL = 60.0
 LOCAL_T0_ENTER_SCORE = 0.70
 
-# 真实持仓参数
-BUY_1_PRICE = 49.95
-BUY_1_SHARES = 1700
-BUY_2_PRICE = 50.60
-BUY_2_SHARES = 2000
-INITIAL_SHARES = BUY_1_SHARES + BUY_2_SHARES
 COMMISSION_RATE = 0.0001
-INITIAL_COST = (
-    BUY_1_SHARES * BUY_1_PRICE * (1.0 + COMMISSION_RATE)
-    + BUY_2_SHARES * BUY_2_PRICE * (1.0 + COMMISSION_RATE)
-)
+
+
+def load_live_config(path: str = CONFIG_FILE) -> dict:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing live config: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if config.get("symbol") != SYMBOL_CODE:
+        raise ValueError(f"config symbol mismatch: {config.get('symbol')} != {SYMBOL_CODE}")
+    for key in ("shares", "cash", "cost_price"):
+        if key not in config:
+            raise ValueError(f"Missing live config field: {key}")
+    return config
+
+
+LIVE_CONFIG = load_live_config()
+CURRENT_COST_PRICE = float(LIVE_CONFIG["cost_price"])
+INITIAL_SHARES = int(LIVE_CONFIG["shares"])
+INITIAL_CASH = float(LIVE_CONFIG["cash"])
+INITIAL_POSITION_COST = INITIAL_SHARES * CURRENT_COST_PRICE
+INITIAL_COST = INITIAL_POSITION_COST + INITIAL_CASH
+INITIAL_TARGET_PCT = INITIAL_POSITION_COST / INITIAL_COST if INITIAL_COST > 0 else 1.0
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -87,6 +105,292 @@ class TickDataWriter:
             
         self.csv_writer.writerow(row)
         self.file.flush()
+
+
+class StrategyStateStore:
+    def __init__(self, state_path: str, trade_log_path: str):
+        self.state_path = state_path
+        self.trade_log_path = trade_log_path
+        self.ignored_state = None
+
+    @staticmethod
+    def _dt_to_text(value):
+        if value is None:
+            return None
+        return value.isoformat()
+
+    @staticmethod
+    def _parse_dt(value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _safe_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _state_matches_live_config(cls, state: dict) -> bool:
+        state_config = state.get("live_config")
+        if isinstance(state_config, dict):
+            shares = cls._safe_int(state_config.get("shares"))
+            cash = cls._safe_float(state_config.get("cash"))
+            cost_price = cls._safe_float(state_config.get("cost_price"))
+            return (
+                shares == INITIAL_SHARES
+                and cash is not None
+                and abs(cash - INITIAL_CASH) <= 0.01
+                and cost_price is not None
+                and abs(cost_price - CURRENT_COST_PRICE) <= 0.0001
+            )
+
+        initial_cost = cls._safe_float(state.get("initial_cost"))
+        return initial_cost is not None and abs(initial_cost - INITIAL_COST) <= 0.01
+
+    @staticmethod
+    def _trade_to_dict(
+        trade: TradeRecord,
+        strategy: CombinedStrategyV5 | None = None,
+        tick: dict | None = None,
+    ) -> dict:
+        row = {
+            "timestamp": trade.timestamp.isoformat(),
+            "side": trade.side,
+            "price": trade.price,
+            "shares": trade.shares,
+            "position_shares": trade.position_shares,
+            "cash_after": trade.cash_after,
+            "target_pct": trade.target_pct,
+            "mode": trade.mode,
+            "reason": trade.reason,
+            "detail": trade.detail,
+        }
+        if tick:
+            row["tick_time"] = tick.get("server_time", "")
+            row["last_price"] = tick.get("price", tick.get("Close", ""))
+
+        if strategy is not None:
+            current_price = float(row.get("last_price") or trade.price)
+            row["asset_after"] = strategy.total_asset(current_price)
+            row["position_pct_after"] = strategy.current_position_pct(current_price)
+            row["day_trade_count"] = strategy.day_trade_count
+            snapshot = strategy.factor_calc.last_snapshot
+            if snapshot is not None:
+                row.update(
+                    {
+                        "day_vwap_dev": snapshot.day_vwap_dev,
+                        "local_vwap_dev": snapshot.local_vwap_dev,
+                        "velocity": snapshot.velocity,
+                        "acceleration": snapshot.acceleration,
+                        "vol_mom": snapshot.vol_mom,
+                        "day_return": snapshot.day_return,
+                        "vwap": snapshot.vwap,
+                        "local_vwap": snapshot.local_vwap,
+                        "range_position": snapshot.range_position,
+                        "orderbook_imbalance": snapshot.orderbook_imbalance,
+                        "cross_buy_score": strategy._score_cross_buy(snapshot),
+                        "cross_sell_score": strategy._score_cross_sell(snapshot),
+                        "local_trim_score": strategy._score_local_trim(snapshot),
+                        "local_cover_score": strategy._score_local_cover(snapshot),
+                        "buy_timing_score": strategy._score_buy_timing(snapshot),
+                        "sell_timing_score": strategy._score_sell_timing(snapshot),
+                    }
+                )
+        return row
+
+    @staticmethod
+    def _trade_from_dict(row: dict) -> TradeRecord:
+        timestamp = StrategyStateStore._parse_dt(row.get("timestamp")) or datetime.now()
+        return TradeRecord(
+            timestamp=timestamp,
+            side=str(row.get("side", "")),
+            price=float(row.get("price", 0.0) or 0.0),
+            shares=int(row.get("shares", 0) or 0),
+            position_shares=int(row.get("position_shares", 0) or 0),
+            cash_after=float(row.get("cash_after", 0.0) or 0.0),
+            target_pct=float(row.get("target_pct", 0.0) or 0.0),
+            mode=str(row.get("mode", PositionMode.NEUTRAL.value)),
+            reason=str(row.get("reason", "")),
+            detail=str(row.get("detail", "")),
+        )
+
+    def load(self, strategy: CombinedStrategyV5) -> dict | None:
+        self.ignored_state = None
+        if not os.path.exists(self.state_path):
+            return None
+
+        with open(self.state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        if state.get("symbol") != SYMBOL_CODE:
+            raise ValueError(f"state symbol mismatch: {state.get('symbol')} != {SYMBOL_CODE}")
+
+        if not self._state_matches_live_config(state):
+            self.ignored_state = dict(state)
+            self.ignored_state["ignored_reason"] = "state baseline does not match current live_config"
+            return None
+
+        strategy.cash = float(state.get("cash", strategy.cash) or 0.0)
+        strategy.shares = int(state.get("shares", strategy.shares) or 0)
+        strategy.target_pct = float(state.get("target_pct", strategy.target_pct) or 0.0)
+        try:
+            strategy.mode = PositionMode(state.get("mode", strategy.mode.value))
+        except ValueError:
+            strategy.mode = strategy._mode_from_target(strategy.target_pct)
+
+        strategy.current_date = state.get("current_date")
+        strategy.day_trade_count = int(state.get("day_trade_count", 0) or 0)
+        strategy.last_trade_dt = self._parse_dt(state.get("last_trade_dt"))
+        strategy.local_base_target_pct = state.get("local_base_target_pct")
+        pending_cross_buy = state.get("pending_cross_buy")
+        strategy.pending_cross_buy = tuple(pending_cross_buy) if pending_cross_buy else None
+        strategy.local_t_cycle = state.get("local_t_cycle")
+        strategy.local_t_cycle_base_pct = state.get("local_t_cycle_base_pct")
+        strategy.local_t_entry_price = state.get("local_t_entry_price")
+        strategy.local_t_entry_shares = int(state.get("local_t_entry_shares", 0) or 0)
+        strategy.trades = [self._trade_from_dict(row) for row in state.get("trades", [])]
+
+        return state
+
+    def save(self, strategy: CombinedStrategyV5, tick: dict | None = None, reason: str = "snapshot") -> None:
+        last_price = None
+        last_tick_time = None
+        if tick:
+            last_price = tick.get("price", tick.get("Close"))
+            tick_time = tick.get("Time")
+            if isinstance(tick_time, datetime):
+                last_tick_time = tick_time.isoformat()
+            elif tick_time:
+                last_tick_time = str(tick_time)
+
+        state = {
+            "version": 1,
+            "symbol": SYMBOL_CODE,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "save_reason": reason,
+            "initial_cost": INITIAL_COST,
+            "cash": strategy.cash,
+            "shares": strategy.shares,
+            "target_pct": strategy.target_pct,
+            "mode": strategy.mode.value,
+            "current_date": strategy.current_date,
+            "day_trade_count": strategy.day_trade_count,
+            "last_trade_dt": self._dt_to_text(strategy.last_trade_dt),
+            "local_base_target_pct": strategy.local_base_target_pct,
+            "pending_cross_buy": list(strategy.pending_cross_buy) if strategy.pending_cross_buy else None,
+            "local_t_cycle": strategy.local_t_cycle,
+            "local_t_cycle_base_pct": strategy.local_t_cycle_base_pct,
+            "local_t_entry_price": strategy.local_t_entry_price,
+            "local_t_entry_shares": strategy.local_t_entry_shares,
+            "last_price": last_price,
+            "last_tick_time": last_tick_time,
+            "trades": [self._trade_to_dict(trade) for trade in strategy.trades],
+            "live_config": {
+                "shares": INITIAL_SHARES,
+                "cash": INITIAL_CASH,
+                "cost_price": CURRENT_COST_PRICE,
+                "updated_at": LIVE_CONFIG.get("updated_at"),
+            },
+        }
+
+        tmp_path = self.state_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, self.state_path)
+
+    def append_trade(
+        self,
+        trade: TradeRecord,
+        strategy: CombinedStrategyV5 | None = None,
+        tick: dict | None = None,
+    ) -> None:
+        fieldnames = [
+            "timestamp",
+            "tick_time",
+            "side",
+            "price",
+            "last_price",
+            "shares",
+            "position_shares",
+            "cash_after",
+            "asset_after",
+            "position_pct_after",
+            "target_pct",
+            "mode",
+            "day_trade_count",
+            "reason",
+            "detail",
+            "day_vwap_dev",
+            "local_vwap_dev",
+            "velocity",
+            "acceleration",
+            "vol_mom",
+            "day_return",
+            "vwap",
+            "local_vwap",
+            "range_position",
+            "orderbook_imbalance",
+            "cross_buy_score",
+            "cross_sell_score",
+            "local_trim_score",
+            "local_cover_score",
+            "buy_timing_score",
+            "sell_timing_score",
+        ]
+        file_exists = os.path.exists(self.trade_log_path)
+        with open(self.trade_log_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            row = self._trade_to_dict(trade, strategy=strategy, tick=tick)
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def _position_summary(shares: int, cash: float, price: float | None) -> str:
+    if price and price > 0:
+        asset = shares * price + cash
+        pct = shares * price / asset if asset > 0 else 0.0
+        return f"{shares}股 | 现金 {cash:,.2f} | 最新价 {price:.2f} | 资产 {asset:,.2f} | 仓位 {pct*100:.1f}%"
+    return f"{shares}股 | 现金 {cash:,.2f} | 最新价 -- | 仓位 --"
+
+
+def log_position_reconciliation(
+    log_queue: queue.Queue,
+    strategy: CombinedStrategyV5,
+    loaded_state: dict | None,
+    latest_tick: dict | None,
+) -> None:
+    latest_price = None
+    if latest_tick:
+        latest_price = float(latest_tick.get("price", latest_tick.get("Close", 0.0)) or 0.0)
+    log_queue.put("[CHECK] 持仓核对")
+    log_queue.put(
+        "[CHECK] 配置: "
+        + _position_summary(INITIAL_SHARES, INITIAL_CASH, latest_price)
+        + f" | 成本价 {CURRENT_COST_PRICE:.3f} | 配置时间 {LIVE_CONFIG.get('updated_at', '-')}"
+    )
+    if loaded_state:
+        log_queue.put(
+            "[CHECK] 状态: "
+            + _position_summary(int(loaded_state.get("shares", 0) or 0), float(loaded_state.get("cash", 0.0) or 0.0), latest_price)
+            + f" | 保存时间 {loaded_state.get('saved_at', '-')} | 原因 {loaded_state.get('save_reason', '-')}"
+        )
+    else:
+        log_queue.put("[CHECK] 状态: 未找到状态文件, 已按配置接管")
+    log_queue.put("[CHECK] 运行: " + _position_summary(strategy.shares, strategy.cash, latest_price))
 
 def is_trading_time() -> bool:
     now = datetime.now()
@@ -173,21 +477,50 @@ def worker_thread(update_queue: queue.Queue, log_queue: queue.Queue):
     async def _async_main():
         fetcher = TencentFetcher(SYMBOL_CODE)
         writer = TickDataWriter(DATA_DIR, SYMBOL_CODE)
+        state_store = StrategyStateStore(STATE_FILE, TRADE_LOG_FILE)
+        quality_monitor = RealtimeDataQualityMonitor()
         
         strategy = CombinedStrategyV5(
             initial_capital=INITIAL_COST,
             local_enter_score=LOCAL_T0_ENTER_SCORE,
         )
-        strategy.cash = 0.0
-        strategy.shares = INITIAL_SHARES
-        strategy.target_pct = 1.0
-        strategy.mode = PositionMode.ATTACK
+
+        ignored_state = None
+        try:
+            loaded_state = state_store.load(strategy)
+            ignored_state = state_store.ignored_state
+        except Exception as e:
+            log_queue.put(f"[!] 状态恢复失败, 已停止启动: {e}")
+            log_queue.put(f"[!] 请检查或移走状态文件: {os.path.abspath(STATE_FILE)}")
+            return
+
+        if loaded_state:
+            log_queue.put(
+                f"[STATE] 已恢复: {strategy.shares}股 | 目标 {strategy.target_pct*100:.1f}% | "
+                f"现金 {strategy.cash:,.2f} | 保存时间 {loaded_state.get('saved_at', '-')}"
+            )
+        else:
+            if ignored_state:
+                log_queue.put(
+                    f"[STATE] 已忽略旧状态: {ignored_state.get('shares', '-')}股 | "
+                    f"现金 {float(ignored_state.get('cash', 0.0) or 0.0):,.2f} | "
+                    f"保存时间 {ignored_state.get('saved_at', '-')}"
+                )
+                log_queue.put("[STATE] 原因: 状态基线与当前 live_config 不一致，已按 live_config 重新接管")
+            strategy.cash = INITIAL_CASH
+            strategy.shares = INITIAL_SHARES
+            strategy.target_pct = INITIAL_TARGET_PCT
+            strategy.mode = strategy._mode_from_target(strategy.target_pct)
+            state_store.save(strategy, reason="initial_seed")
         
         log_queue.put(f"初始化完成 | 标的: {SYMBOL_CODE} {SYMBOL_NAME}")
         log_queue.put(f"数据存储: {os.path.abspath(DATA_DIR)}\\")
+        log_queue.put(f"状态文件: {os.path.abspath(STATE_FILE)}")
+        log_queue.put(f"交易流水: {os.path.abspath(TRADE_LOG_FILE)}")
         log_queue.put(f"策略引擎: CombinedStrategyV5 (cross-day + local T)")
         log_queue.put(f"局部T阈值: {LOCAL_T0_ENTER_SCORE:.2f}")
-        log_queue.put(f"接管持仓: {INITIAL_SHARES}股 (成本 ~{INITIAL_COST:,.2f}元)")
+        log_queue.put(f"当前持仓: {strategy.shares}股 | 现金 {strategy.cash:,.2f} | 成本基准 ~{INITIAL_COST:,.2f}元")
+        log_queue.put(f"持仓成本价: {CURRENT_COST_PRICE:.3f} | 接管目标仓位: {INITIAL_TARGET_PCT*100:.1f}%")
         
         try:
             import aiohttp
@@ -205,8 +538,10 @@ def worker_thread(update_queue: queue.Queue, log_queue: queue.Queue):
             else:
                 log_queue.put("[!] 首次连接未返回新数据 (可能非交易时间或未更新)")
                 fetcher.last_server_ts = None
+            log_position_reconciliation(log_queue, strategy, loaded_state or ignored_state, test_tick)
                 
             consecutive_errors = 0
+            last_state_save_ts = 0.0
             while True:
                 try:
                     if not is_trading_time():
@@ -215,6 +550,10 @@ def worker_thread(update_queue: queue.Queue, log_queue: queue.Queue):
                             wait_s = seconds_until(next_win)
                             if wait_s % 30 < FETCH_INTERVAL:  
                                 log_queue.put(f"[PAUSE] 非交易时间, 等待 {win_name}")
+                            now_ts = time.time()
+                            if now_ts - last_state_save_ts >= STATE_SAVE_INTERVAL:
+                                state_store.save(strategy, reason="pause_snapshot")
+                                last_state_save_ts = now_ts
                             update_queue.put({
                                 "status": "PAUSE",
                                 "win_name": win_name,
@@ -234,6 +573,16 @@ def worker_thread(update_queue: queue.Queue, log_queue: queue.Queue):
                         continue
                         
                     consecutive_errors = 0
+                    dq_issues = quality_monitor.check(tick)
+                    if dq_issues:
+                        for issue in dq_issues:
+                            log_queue.put(f"[DQ:{issue.severity.upper()}] {issue.message}")
+                    if has_critical_issue(dq_issues):
+                        writer.write(tick, "DQ_SKIP")
+                        state_store.save(strategy, tick, reason="data_quality_skip")
+                        elapsed = time.time() - start_ts
+                        await asyncio.sleep(max(0, FETCH_INTERVAL - elapsed))
+                        continue
                     
                     trade_record = strategy.on_tick(tick)
                     
@@ -241,6 +590,12 @@ def worker_thread(update_queue: queue.Queue, log_queue: queue.Queue):
                     if trade_record:
                         signal_str = trade_record.side
                         log_queue.put(f"[{trade_record.side}] @ {trade_record.price:.2f} | {trade_record.reason} | {trade_record.detail}")
+                        state_store.append_trade(trade_record, strategy=strategy, tick=tick)
+                        state_store.save(strategy, tick, reason="trade")
+                        last_state_save_ts = time.time()
+                    elif time.time() - last_state_save_ts >= STATE_SAVE_INTERVAL:
+                        state_store.save(strategy, tick, reason="heartbeat")
+                        last_state_save_ts = time.time()
                         
                     writer.write(tick, signal_str)
                     
@@ -420,17 +775,20 @@ class App(ctk.CTk):
         
         current_price = tick["price"]
         
-        # Calculate derived values from the strategy factor state.
-        day_vwap_dev = current_price / calc.vwap - 1.0 if calc.vwap > 0 else 0.0
-        
-        local_amt = sum(calc.local_amt_history)
-        local_vol = sum(calc.local_vol_history)
-        local_vwap = local_amt / local_vol if local_vol > 0 else (sum(calc.local_price_history) / len(calc.local_price_history) if calc.local_price_history else current_price)
-        local_vwap_dev = current_price / local_vwap - 1.0 if local_vwap > 0 else 0.0
-        
-        velocity = calc.vel_history[-1] if calc.vel_history else 0.0
-        acceleration = (calc.vel_history[-1] - calc.vel_history[-6]) if len(calc.vel_history) >= 6 else 0.0
-        day_return = current_price / calc.prev_close - 1.0 if calc.prev_close > 0 else 0.0
+        # Use the exact factor snapshot produced by the strategy engine.
+        snapshot = calc.last_snapshot
+        if snapshot is not None:
+            day_vwap_dev = snapshot.day_vwap_dev
+            local_vwap_dev = snapshot.local_vwap_dev
+            velocity = snapshot.velocity
+            acceleration = snapshot.acceleration
+            day_return = snapshot.day_return
+        else:
+            day_vwap_dev = current_price / calc.vwap - 1.0 if calc.vwap > 0 else 0.0
+            local_vwap_dev = 0.0
+            velocity = 0.0
+            acceleration = 0.0
+            day_return = current_price / calc.prev_close - 1.0 if calc.prev_close > 0 else 0.0
 
         # Header
         self.lbl_sys_status.configure(text=f"刷新时间: {tick['server_time']}", text_color="gray")

@@ -1,10 +1,12 @@
 import glob
 import os
+import warnings
 from typing import Any
 
 import pandas as pd
 
 from combined_strategy_v5 import ANCHOR_PCT, COMMISSION_RATE, CombinedStrategyV5
+from data_quality import validate_market_frame
 
 
 DATA_DIR = os.path.join("data", "sz002796")
@@ -42,8 +44,7 @@ def load_market_data(start_date: str = START_DATE) -> pd.DataFrame:
             df["tick_amt"] = df["cum_amount"].diff().fillna(df["cum_amount"]).clip(lower=0.0)
 
         df["date"] = trade_date
-        frames.append(
-            df[
+        day_frame = df[
                 [
                     "dt",
                     "date",
@@ -59,7 +60,14 @@ def load_market_data(start_date: str = START_DATE) -> pd.DataFrame:
                     *orderbook_cols,
                 ]
             ].dropna(subset=["dt", "price"])
-        )
+
+        issues = validate_market_frame(day_frame, source=path)
+        for issue in issues:
+            if issue.severity == "critical":
+                raise RuntimeError(issue.message)
+            warnings.warn(issue.message, RuntimeWarning, stacklevel=2)
+
+        frames.append(day_frame)
 
     if not frames:
         raise RuntimeError(f"No CSV data found under {DATA_DIR} from {start_date}")

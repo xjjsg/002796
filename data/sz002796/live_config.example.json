@@ -1,0 +1,9 @@
+{
+  "symbol": "sz002796",
+  "name": "世嘉科技",
+  "shares": 3000,
+  "cash": 10000.0,
+  "cost_price": 44.144,
+  "updated_at": "2026-06-02",
+  "notes": "Copy to live_config.json and adjust to the current real account state."
+}

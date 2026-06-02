@@ -11,6 +11,12 @@ env/
 logs/*.log
 dist/logs/*.log
 
+# Local realtime strategy state
+data/*/live_config.json
+data/*/*_strategy_state.json
+data/*/*_strategy_state.json.tmp
+data/*/*_strategy_trades.csv
+
 # Build outputs
 build/
 dist/
