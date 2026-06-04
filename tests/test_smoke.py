@@ -8,15 +8,21 @@ from pathlib import Path
 os.environ.setdefault("LIVE_CONFIG_FILE", str(Path("data/sz002796/live_config.example.json")))
 
 from combined_strategy_v5 import CombinedStrategyV5
+from combined_strategy_v5_regime import CombinedStrategyV5Regime
 from gui_realtime_002796 import INITIAL_COST, PositionMode, StrategyStateStore, TickDataWriter
 from market_data import load_market_data
+from market_regime import MarketRegime, MarketRegimeDecision, MarketRegimeEngine
 from run_cash_backtest import (
     BacktestExecutionStrategy,
+    BENCHMARK_TARGET_PCT,
+    INITIAL_STRATEGY_TARGET_PCT,
     benchmark_all_in,
+    benchmark_buy_and_hold,
     calculate_trade_costs,
     is_limit_blocked,
     run_backtest,
 )
+from run_regime_backtest import run_backtest as run_regime_backtest
 from strategy_core import IntradayFactorCalc, TradeRecord
 
 
@@ -238,6 +244,13 @@ class SmokeTests(unittest.TestCase):
             places=6,
         )
 
+    def test_70pct_benchmark_buys_base_position_and_keeps_cash(self):
+        benchmark = benchmark_buy_and_hold(1_000_000.0, 28.35, 50.0, target_pct=0.70)
+
+        self.assertEqual(benchmark.buy_shares, 24600)
+        self.assertGreater(benchmark.cash_after_buy, 300000.0)
+        self.assertLess(benchmark.cash_after_buy, 303000.0)
+
     def test_cash_backtest_writes_outputs_without_live_state_inputs(self):
         tmp = Path(tempfile.mkdtemp())
         data_dir = tmp / "data"
@@ -245,8 +258,8 @@ class SmokeTests(unittest.TestCase):
         data_dir.mkdir()
         (data_dir / "sz002796-2026-01-05.csv").write_text(
             "server_time,price,open,high,low,prev_close,cum_volume,cum_amount,tick_vol,tick_amt\n"
-            "10:34:00,10,10,10,10,9,100,1000,100,1000\n"
-            "14:00:00,10.2,10,10.2,10,9,200,2020,100,1020\n",
+            "10:34:00,10,10,10,10,10,100,1000,100,1000\n"
+            "14:00:00,10.2,10,10.2,10,10,200,2020,100,1020\n",
             encoding="utf-8",
         )
 
@@ -256,9 +269,84 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue((out_dir / "trades.csv").exists())
         self.assertTrue((out_dir / "summary.json").exists())
         self.assertEqual(summary["data_rows"], 2)
+        self.assertEqual(summary["initial_strategy_target_pct"], INITIAL_STRATEGY_TARGET_PCT)
+        self.assertEqual(summary["benchmark_target_pct"], BENCHMARK_TARGET_PCT)
+        self.assertTrue(summary["initial_seed_trade"])
+        trades = (out_dir / "trades.csv").read_text(encoding="utf-8-sig").splitlines()
+        self.assertIn("initial 70% base position", trades[1])
         self.assertEqual(summary["known_data_quality_warnings"], [])
         for forbidden in ("live_config.json", "strategy_state", "strategy_trades"):
             self.assertNotIn(forbidden, source)
+
+    def test_market_regime_flags_breakdown_below_recent_low(self):
+        engine = MarketRegimeEngine()
+        for day in range(1, 6):
+            engine.update(
+                {
+                    "Time": datetime(2026, 1, day, 15, 0),
+                    "price": 10.0,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.0,
+                    "Volume": 1000.0,
+                    "Amount": 10000.0,
+                }
+            )
+
+        decision = engine.update(
+            {
+                "Time": datetime(2026, 1, 6, 14, 0),
+                "price": 8.8,
+                "open": 10.0,
+                "high": 10.0,
+                "low": 8.8,
+                "Volume": 1000.0,
+                "Amount": 9200.0,
+            }
+        )
+
+        self.assertEqual(decision.regime, MarketRegime.OVERSOLD_BOUNCE)
+        # OVERSOLD_BOUNCE: score is 1.0 (strong intensity)
+        self.assertEqual(decision.regime_score, 1.0)
+        # Bands should reflect bounce (e.g. 0.60 floor, 1.00 ceiling)
+        self.assertGreaterEqual(decision.target_ceiling_pct, 1.0)
+
+    def test_regime_copy_clamps_target_to_state_band(self):
+        strategy = CombinedStrategyV5Regime()
+        strategy.regime_decision = MarketRegimeDecision(
+            regime=MarketRegime.HIGH_VOLUME_TREND,
+            tags=("above_vwap", "high_volume"),
+            confidence=0.7,
+            target_floor_pct=0.50,
+            target_ceiling_pct=1.0,
+            regime_score=0.9,
+            detail="test",
+        )
+
+        target, detail = strategy._apply_regime_target(0.40, "trim")
+
+        self.assertAlmostEqual(target, 0.50)
+        self.assertIn("regime=HIGH_VOLUME_TREND", detail)
+
+    def test_regime_backtest_writes_independent_outputs(self):
+        tmp = Path(tempfile.mkdtemp())
+        data_dir = tmp / "data"
+        out_dir = tmp / "regime_records"
+        data_dir.mkdir()
+        (data_dir / "sz002796-2026-01-05.csv").write_text(
+            "server_time,price,open,high,low,prev_close,cum_volume,cum_amount,tick_vol,tick_amt\n"
+            "10:34:00,10,10,10,10,10,100,1000,100,1000\n"
+            "14:00:00,10.2,10,10.2,10,10,200,2020,100,1020\n",
+            encoding="utf-8",
+        )
+
+        summary = run_regime_backtest(start_date="2026-01-05", data_dir=data_dir, output_dir=out_dir)
+
+        self.assertEqual(summary["strategy_variant"], "CombinedStrategyV5Regime")
+        self.assertTrue(summary["initial_seed_trade"])
+        self.assertTrue((out_dir / "trades.csv").exists())
+        self.assertTrue((out_dir / "summary.json").exists())
+        self.assertIn("regime_counts", summary)
 
 
 if __name__ == "__main__":

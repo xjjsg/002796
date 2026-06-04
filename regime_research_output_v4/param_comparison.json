@@ -1,0 +1,58 @@
+[
+  {
+    "regime": "OVERSOLD_BOUNCE",
+    "sample_count": 7,
+    "score": 0.512,
+    "current_floor": 0.45,
+    "current_ceiling": 0.85,
+    "data_floor": 0.55,
+    "data_ceiling": 0.85,
+    "floor_delta": 0.1,
+    "ceiling_delta": 0.0,
+    "avg_fwd_5d": 7.399,
+    "win_rate_5d": 85.7,
+    "avg_fwd_5d_dd": 6.528
+  },
+  {
+    "regime": "HIGH_VOLUME_TREND",
+    "sample_count": 6,
+    "score": 0.072,
+    "current_floor": 0.45,
+    "current_ceiling": 0.85,
+    "data_floor": 0.45,
+    "data_ceiling": 0.85,
+    "floor_delta": 0.0,
+    "ceiling_delta": 0.0,
+    "avg_fwd_5d": 3.905,
+    "win_rate_5d": 50.0,
+    "avg_fwd_5d_dd": 5.818
+  },
+  {
+    "regime": "EXHAUSTION",
+    "sample_count": 39,
+    "score": -0.248,
+    "current_floor": 0.45,
+    "current_ceiling": 0.85,
+    "data_floor": 0.4,
+    "data_ceiling": 0.7,
+    "floor_delta": -0.05,
+    "ceiling_delta": -0.15,
+    "avg_fwd_5d": -0.7,
+    "win_rate_5d": 38.5,
+    "avg_fwd_5d_dd": 7.325
+  },
+  {
+    "regime": "RANGE",
+    "sample_count": 47,
+    "score": 0.188,
+    "current_floor": 0.45,
+    "current_ceiling": 0.85,
+    "data_floor": 0.45,
+    "data_ceiling": 0.85,
+    "floor_delta": 0.0,
+    "ceiling_delta": 0.0,
+    "avg_fwd_5d": 5.241,
+    "win_rate_5d": 60.9,
+    "avg_fwd_5d_dd": 7.866
+  }
+]

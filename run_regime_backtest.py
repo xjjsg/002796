@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from combined_strategy_v5 import CombinedStrategyV5
+from combined_strategy_v5_regime import CombinedStrategyV5Regime
 from market_data import DATA_DIR, MarketDataBundle, load_market_data, row_to_tick
 from strategy_core import (
     COMMISSION_RATE,
@@ -26,7 +26,7 @@ START_DATE = "2026-01-05"
 MIN_COMMISSION = 5.0
 INITIAL_STRATEGY_TARGET_PCT = 0.70
 BENCHMARK_TARGET_PCT = 0.70
-OUTPUT_DIR = Path(__file__).resolve().parent / "backtest_records" / "seed70_100w_2026-01-05_to_latest"
+OUTPUT_DIR = Path(__file__).resolve().parent / "backtest_records" / "regime_seed70_100w_2026-01-05_to_latest"
 
 TRADE_COLUMNS = [
     "time",
@@ -152,7 +152,7 @@ def benchmark_all_in(initial_cash: float, buy_price: float, final_price: float) 
     return benchmark_buy_and_hold(initial_cash, buy_price, final_price, target_pct=1.0)
 
 
-class BacktestExecutionStrategy(CombinedStrategyV5):
+class RegimeBacktestExecutionStrategy(CombinedStrategyV5Regime):
     def __init__(self, initial_capital: float = INITIAL_CAPITAL, min_commission: float = MIN_COMMISSION, **kwargs: Any):
         super().__init__(initial_capital=initial_capital, **kwargs)
         self.cash = initial_capital
@@ -332,7 +332,7 @@ class BacktestExecutionStrategy(CombinedStrategyV5):
 
 
 def seed_initial_position(
-    strategy: BacktestExecutionStrategy,
+    strategy: RegimeBacktestExecutionStrategy,
     first_row: pd.Series,
     target_pct: float = INITIAL_STRATEGY_TARGET_PCT,
 ) -> TradeRecord | None:
@@ -390,7 +390,7 @@ def run_backtest(
     first_price = float(first_row["price"])
     last_price = float(last_row["price"])
 
-    strategy = BacktestExecutionStrategy(initial_capital=INITIAL_CAPITAL)
+    strategy = RegimeBacktestExecutionStrategy(initial_capital=INITIAL_CAPITAL)
     seed_record = seed_initial_position(strategy, first_row, initial_strategy_target_pct)
     benchmark = benchmark_buy_and_hold(INITIAL_CAPITAL, first_price, last_price, benchmark_target_pct)
     full_hold_benchmark = benchmark_all_in(INITIAL_CAPITAL, first_price, last_price)
@@ -398,9 +398,13 @@ def run_backtest(
     equity_curve: list[float] = []
     benchmark_curve: list[float] = []
     full_hold_benchmark_curve: list[float] = []
+    regime_counts: dict[str, int] = {}
     for _, row in df.iterrows():
         tick = row_to_tick(row)
         strategy.on_tick(tick)
+        if strategy.regime_decision is not None:
+            regime = strategy.regime_decision.regime.value
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
         mark_price = float(row["price"])
         equity_curve.append(strategy.total_asset(mark_price))
         benchmark_curve.append(benchmark.cash_after_buy + benchmark.buy_shares * mark_price)
@@ -426,6 +430,8 @@ def run_backtest(
         "initial_strategy_target_pct": initial_strategy_target_pct,
         "benchmark_target_pct": benchmark_target_pct,
         "initial_seed_trade": seed_record is not None,
+        "strategy_variant": "CombinedStrategyV5Regime",
+        "regime_counts": regime_counts,
         "strategy_final_asset": round(strategy_final_asset, 4),
         "benchmark_final_asset": round(benchmark_final_asset, 4),
         "full_hold_benchmark_final_asset": round(full_hold_benchmark_final_asset, 4),
@@ -477,7 +483,7 @@ def run_backtest(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run 70%-seeded V5 backtest for sz002796.")
+    parser = argparse.ArgumentParser(description="Run 70%-seeded V5 regime backtest for sz002796.")
     parser.add_argument("--start-date", default=START_DATE)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--data-dir", default=str(DATA_DIR))
@@ -495,6 +501,7 @@ def main() -> None:
         benchmark_target_pct=args.benchmark_target_pct,
     )
     print(f"rows={summary['data_rows']} trades={summary['trade_count']}")
+    print(f"variant={summary['strategy_variant']}")
     print(f"strategy_final_asset={summary['strategy_final_asset']:.2f}")
     print(f"benchmark_70pct_final_asset={summary['benchmark_final_asset']:.2f}")
     print(f"full_hold_benchmark_final_asset={summary['full_hold_benchmark_final_asset']:.2f}")

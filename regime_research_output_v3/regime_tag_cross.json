@@ -1,0 +1,209 @@
+[
+  {
+    "regime": "RANGE",
+    "tag": "above_ma10",
+    "count": 13,
+    "avg_fwd_1d": -0.404,
+    "avg_fwd_5d": -1.118,
+    "avg_fwd_5d_dd": 7.095,
+    "win_rate_5d": 38.5
+  },
+  {
+    "regime": "RANGE",
+    "tag": "above_ma20",
+    "count": 13,
+    "avg_fwd_1d": -0.132,
+    "avg_fwd_5d": -2.032,
+    "avg_fwd_5d_dd": 7.276,
+    "win_rate_5d": 38.5
+  },
+  {
+    "regime": "RANGE",
+    "tag": "above_ma5",
+    "count": 14,
+    "avg_fwd_1d": 0.173,
+    "avg_fwd_5d": 6.806,
+    "avg_fwd_5d_dd": 4.843,
+    "win_rate_5d": 64.3
+  },
+  {
+    "regime": "RANGE",
+    "tag": "above_vwap",
+    "count": 16,
+    "avg_fwd_1d": 0.122,
+    "avg_fwd_5d": 5.185,
+    "avg_fwd_5d_dd": 5.729,
+    "win_rate_5d": 62.5
+  },
+  {
+    "regime": "RANGE",
+    "tag": "below_ma10",
+    "count": 18,
+    "avg_fwd_1d": -0.928,
+    "avg_fwd_5d": -0.707,
+    "avg_fwd_5d_dd": 7.534,
+    "win_rate_5d": 44.4
+  },
+  {
+    "regime": "RANGE",
+    "tag": "below_ma20",
+    "count": 14,
+    "avg_fwd_1d": -1.846,
+    "avg_fwd_5d": 1.397,
+    "avg_fwd_5d_dd": 6.585,
+    "win_rate_5d": 57.1
+  },
+  {
+    "regime": "RANGE",
+    "tag": "below_ma5",
+    "count": 22,
+    "avg_fwd_1d": -0.162,
+    "avg_fwd_5d": 0.026,
+    "avg_fwd_5d_dd": 7.912,
+    "win_rate_5d": 40.9
+  },
+  {
+    "regime": "RANGE",
+    "tag": "below_vwap",
+    "count": 20,
+    "avg_fwd_1d": -0.156,
+    "avg_fwd_5d": 0.644,
+    "avg_fwd_5d_dd": 7.51,
+    "win_rate_5d": 40.0
+  },
+  {
+    "regime": "RANGE",
+    "tag": "high_volume",
+    "count": 7,
+    "avg_fwd_1d": 2.973,
+    "avg_fwd_5d": 13.439,
+    "avg_fwd_5d_dd": 4.369,
+    "win_rate_5d": 71.4
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "above_ma5",
+    "count": 6,
+    "avg_fwd_1d": 0.425,
+    "avg_fwd_5d": 0.237,
+    "avg_fwd_5d_dd": 6.394,
+    "win_rate_5d": 33.3
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "above_vwap",
+    "count": 9,
+    "avg_fwd_1d": 1.216,
+    "avg_fwd_5d": 3.146,
+    "avg_fwd_5d_dd": 5.989,
+    "win_rate_5d": 55.6
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "below_ma10",
+    "count": 27,
+    "avg_fwd_1d": 1.007,
+    "avg_fwd_5d": 3.681,
+    "avg_fwd_5d_dd": 6.346,
+    "win_rate_5d": 53.8
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "below_ma20",
+    "count": 27,
+    "avg_fwd_1d": 1.007,
+    "avg_fwd_5d": 3.681,
+    "avg_fwd_5d_dd": 6.346,
+    "win_rate_5d": 53.8
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "below_ma5",
+    "count": 21,
+    "avg_fwd_1d": 1.181,
+    "avg_fwd_5d": 4.714,
+    "avg_fwd_5d_dd": 6.331,
+    "win_rate_5d": 60.0
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "below_vwap",
+    "count": 18,
+    "avg_fwd_1d": 0.896,
+    "avg_fwd_5d": 3.964,
+    "avg_fwd_5d_dd": 6.534,
+    "win_rate_5d": 52.9
+  },
+  {
+    "regime": "TREND_DOWN",
+    "tag": "high_volume",
+    "count": 5,
+    "avg_fwd_1d": -2.802,
+    "avg_fwd_5d": -2.836,
+    "avg_fwd_5d_dd": 7.938,
+    "win_rate_5d": 40.0
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "above_ma10",
+    "count": 31,
+    "avg_fwd_1d": 0.289,
+    "avg_fwd_5d": -0.535,
+    "avg_fwd_5d_dd": 9.842,
+    "win_rate_5d": 48.4
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "above_ma20",
+    "count": 25,
+    "avg_fwd_1d": 0.604,
+    "avg_fwd_5d": -0.43,
+    "avg_fwd_5d_dd": 10.134,
+    "win_rate_5d": 48.0
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "above_ma5",
+    "count": 34,
+    "avg_fwd_1d": 1.369,
+    "avg_fwd_5d": 3.097,
+    "avg_fwd_5d_dd": 8.994,
+    "win_rate_5d": 55.9
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "above_vwap",
+    "count": 26,
+    "avg_fwd_1d": 1.598,
+    "avg_fwd_5d": 0.6,
+    "avg_fwd_5d_dd": 10.164,
+    "win_rate_5d": 50.0
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "below_vwap",
+    "count": 10,
+    "avg_fwd_1d": -0.664,
+    "avg_fwd_5d": 8.185,
+    "avg_fwd_5d_dd": 5.702,
+    "win_rate_5d": 70.0
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "high_volatility",
+    "count": 6,
+    "avg_fwd_1d": -0.934,
+    "avg_fwd_5d": 0.551,
+    "avg_fwd_5d_dd": 9.358,
+    "win_rate_5d": 50.0
+  },
+  {
+    "regime": "TREND_UP",
+    "tag": "high_volume",
+    "count": 5,
+    "avg_fwd_1d": 0.583,
+    "avg_fwd_5d": 8.546,
+    "avg_fwd_5d_dd": 6.008,
+    "win_rate_5d": 80.0
+  }
+]
