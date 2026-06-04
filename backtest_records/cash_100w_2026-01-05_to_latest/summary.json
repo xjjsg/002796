@@ -1,0 +1,39 @@
+{
+  "start_time": "2026-01-05 10:34:00",
+  "end_time": "2026-06-04 14:59:51",
+  "start_date": "2026-01-05",
+  "end_date": "2026-06-04",
+  "data_rows": 44992,
+  "data_files": 99,
+  "strategy_final_asset": 1152246.8452,
+  "benchmark_final_asset": 1616604.208,
+  "strategy_return": 0.15224685,
+  "benchmark_return": 0.61660421,
+  "alpha": -0.46435736,
+  "max_drawdown": 0.23692662,
+  "benchmark_max_drawdown": 0.35355193,
+  "trade_count": 114,
+  "turnover": 17.32876,
+  "final_cash": 477957.8452,
+  "final_shares": 14700,
+  "final_position_pct": 0.58519492,
+  "orderbook_fallback_count": 0,
+  "limit_skip_count": 0,
+  "limit_up_buy_skip_count": 0,
+  "limit_down_sell_skip_count": 0,
+  "benchmark": {
+    "buy_time": "2026-01-05 10:34:00",
+    "buy_price": 28.35,
+    "buy_shares": 35200,
+    "buy_amount": 997920.0,
+    "buy_commission": 99.792,
+    "cash_after_buy": 1980.208
+  },
+  "known_data_quality_warnings": [
+    "2026-01-09: 1 price jumps above 8% between samples"
+  ],
+  "outputs": {
+    "trades_csv": "C:\\Users\\Dell\\Documents\\002796\\backtest_records\\cash_100w_2026-01-05_to_latest\\trades.csv",
+    "summary_json": "C:\\Users\\Dell\\Documents\\002796\\backtest_records\\cash_100w_2026-01-05_to_latest\\summary.json"
+  }
+}

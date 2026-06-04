@@ -61,9 +61,23 @@ class TickDataWriter:
         self.current_date_str = ""
         self.file = None
         self.csv_writer = None
+        self.last_written_server_time = ""
         
     def _get_filename(self, date_str: str) -> str:
         return os.path.join(self.data_dir, f"{self.symbol}-{date_str}.csv")
+
+    @staticmethod
+    def _latest_server_time(filepath: str) -> str:
+        latest = ""
+        try:
+            with open(filepath, "r", newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    server_time = str(row.get("server_time", "") or "")
+                    if server_time > latest:
+                        latest = server_time
+        except (OSError, csv.Error):
+            return ""
+        return latest
         
     def write(self, tick: dict, signal: str = "HOLD"):
         now = datetime.now()
@@ -75,6 +89,7 @@ class TickDataWriter:
             self.current_date_str = date_str
             filepath = self._get_filename(date_str)
             file_exists = os.path.exists(filepath)
+            self.last_written_server_time = self._latest_server_time(filepath) if file_exists else ""
             self.file = open(filepath, 'a', newline='', encoding='utf-8')
             
             self.header = [
@@ -85,10 +100,14 @@ class TickDataWriter:
             self.csv_writer = csv.DictWriter(self.file, fieldnames=self.header, extrasaction='ignore')
             if not file_exists:
                 self.csv_writer.writeheader()
+
+        server_time = str(tick.get("server_time", "") or "")
+        if server_time and self.last_written_server_time and server_time <= self.last_written_server_time:
+            return False
                 
         row = {
             "local_time_ms": int(time.time() * 1000),
-            "server_time": tick.get("server_time", ""),
+            "server_time": server_time,
             "price": tick.get("price", ""),
             "open": tick.get("open", ""),
             "high": tick.get("high", ""),
@@ -105,6 +124,9 @@ class TickDataWriter:
             
         self.csv_writer.writerow(row)
         self.file.flush()
+        if server_time:
+            self.last_written_server_time = server_time
+        return True
 
 
 class StrategyStateStore:
@@ -440,7 +462,7 @@ class TencentFetcher:
                     return None
                     
                 server_time_str = parts[30]
-                if self.last_server_ts == server_time_str:
+                if self.last_server_ts is not None and server_time_str <= self.last_server_ts:
                     return None
                 self.last_server_ts = server_time_str
                 
