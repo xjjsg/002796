@@ -1,96 +1,124 @@
-# 002796.SZ V5 策略监控
+# 002796.SZ V6 Strategy Monitor
 
-这是针对 `002796.SZ 世嘉科技` 的 V5 策略项目。当前代码分为实时监控与历史回测两条路径：实时路径读取实盘配置和状态，历史回测路径只读取历史行情 CSV。
+This project runs the V6 strategy for `002796.SZ` with two paths:
 
-## 文件结构
+- realtime GUI monitoring and state persistence
+- historical backtesting from local CSV market data only
 
-- `strategy_core.py`：因子计算、仓位模型、基础交易执行逻辑。
-- `combined_strategy_v5.py`：V5 策略，包含跨日仓位调整和局部 T 逻辑。
-- `market_regime.py`：市场状态机，输出趋势/修复/震荡/弱势/破位状态及仓位带。
-- `combined_strategy_v5_regime.py`：V5 的测试副本，接入市场状态机，不影响原 V5。
-- `gui_realtime_002796.py`：实时行情拉取、策略运行、GUI 展示、状态持久化。
-- `market_data.py`：统一历史行情加载器，兼容 10 列分钟线和 30 列高频盘口线。
-- `run_cash_backtest.py`：100 万资金、首条行情建 70% 底仓的独立历史回测入口。
-- `run_regime_backtest.py`：V5-Regime 测试版回测入口，用于和原 V5 对照。
-- `data_quality.py`：历史 CSV 和实时 tick 数据质量检查。
-- `tests/test_smoke.py`：核心回归测试。
+## File Structure
 
-## 安装
+### Entry Scripts
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+| File | Description |
+|------|-------------|
+| `run_gui.py` | **Main entry** — Starts the realtime GUI monitoring system. |
+| `run_backtest.py` | Historical backtest runner: ¥1,000,000 cash, 70% initial position, outputs trades + summary. |
 
-## 实时监控
+### `sz002796` Core Package
 
-实时 GUI 使用本地实盘配置和状态文件：
+The project has been modularized into the `sz002796` package for better maintainability:
 
-```text
-data/sz002796/live_config.json
-data/sz002796/sz002796_strategy_state.json
-data/sz002796/sz002796_strategy_trades.csv
-```
+| File | Description |
+|------|-------------|
+| `sz002796/config.py` | Global constants, trading calendar tools, and utility functions (`parse_dt`, `clamp`). |
+| `sz002796/factors.py` | Intraday VWAP factors calculation with real-time rolling windows (`IntradayFactorCalc`). |
+| `sz002796/position.py` | Base strategy logic, trade records, and position tracking (`BaseStrategy`, `TradeRecord`). |
+| `sz002796/regime.py` | Coarse market-state classifier (`UPTREND` / `DOWNTREND` / `RANGE`). |
+| `sz002796/strategy_v6.py` | Current V6 strategy: cross-day adjustment, local T logic, regime guardrails, main-flow guard. |
+| `sz002796/market_data.py` | Historical CSV loader for both 10-column minute and 30-column realtime orderbook formats. |
+| `sz002796/data_quality.py` | Realtime tick and historical CSV quality checks. |
+| `sz002796/execution.py` | Trade cost model (commission, stamp duty) and limit-up/limit-down blocking. |
+| `sz002796/state_store.py` | Realtime trade state serialization, persistence, and reconciliation logic. |
+| `sz002796/tick_writer.py` | Writes realtime ticks into daily CSV files. |
+| `sz002796/fetcher.py` | Realtime asynchronous data fetching from Tencent API. |
+| `sz002796/gui.py` | Graphical User Interface elements built with `customtkinter`. |
+| `sz002796/backtest.py` | Backtest runner logic. |
 
-如果没有实盘配置，可以从示例复制：
+### Configuration
 
-```powershell
-Copy-Item data\sz002796\live_config.example.json data\sz002796\live_config.json
-```
+| File | Description |
+|------|-------------|
+| `requirements.txt` | Python dependencies with version constraints. |
+| `世嘉科技策略监控.spec` | PyInstaller spec for packaging the GUI into a standalone `.exe`. |
+| `.gitignore` | Git ignore rules (caches, state files, build outputs, editor noise). |
 
-启动实时 GUI：
+### Tests
 
-```powershell
-python gui_realtime_002796.py
-```
+| File | Description |
+|------|-------------|
+| `tests/test_smoke.py` | 20 regression tests covering factors, state, trades, execution, regime, and backtest output. |
 
-## 70% 底仓回测
+## Realtime Files
 
-新回测入口不会读取实盘配置、状态或实盘成交流水，只使用 `data/sz002796/sz002796-*.csv` 历史行情。
-
-默认区间从 `2026-01-05` 到当前最新 CSV；策略会在第一条行情先买入 70% 底仓，然后由 V5 继续跨日调仓和局部 T：
-
-```powershell
-python run_cash_backtest.py
-```
-
-测试接入市场状态机的 V5 副本：
-
-```powershell
-python run_regime_backtest.py
-```
-
-输出目录：
+The GUI position source is the V6 simulated account only:
 
 ```text
-backtest_records/seed70_100w_2026-01-05_to_latest/
+backtest_records/v6_seed70_100w_2026-01-05_to_latest/trades.csv
 ```
 
-输出文件：
+That account starts on `2026-01-05` with `1,000,000` cash and `0` shares, buys the initial 70% base position in the backtest, then replays every V6 trade through the latest local CSV data. There is no manual-position configuration.
 
-- `trades.csv`：每笔策略交易，包含成交价、股数、成交额、佣金、印花税、成交后现金、持股、资产、仓位、原因和明细。
-- `summary.json`：策略与 70% 持有基准的最终资产、收益、alpha、最大回撤、交易次数、换手率、盘口 fallback、涨跌停跳过和数据质量告警，并保留 100% 全仓持有基准作为额外对照。
+The V6 runtime writes GUI state and incremental runtime trades to V6-specific files:
 
-## 数据格式
+```text
+data/sz002796/sz002796_v6_strategy_state.json
+data/sz002796/sz002796_v6_strategy_trades.csv
+```
 
-历史行情加载器兼容两种 CSV：
+State files preserve strategy context such as regime and cooldown fields. Cash and shares are recalculated from the simulated-account trade replay each time.
 
-- 10 列分钟线：`server_time, price, open, high, low, prev_close, cum_volume, cum_amount, tick_vol, tick_amt`
-- 30 列高频线：`local_time_ms, server_time, price, open, high, low, prev_close, cum_volume, cum_amount, bp1..bp5/bv1..bv5/sp1..sp5/sv1..sv5, signal`
+Start the GUI:
 
-加载时会按 `dt + local_time_ms` 排序，并始终根据 `cum_volume/cum_amount` 重算 `tick_vol/tick_amt`。分钟线缺失的盘口字段会填 0。
+```powershell
+python run_gui.py
+```
 
-## 测试
+## Backtest
+
+The historical backtest only reads local CSV market data from `data/sz002796/sz002796-*.csv`.
+It does not read GUI state or GUI runtime trade logs.
+
+Run the default V6 backtest:
+
+```powershell
+python run_backtest.py
+```
+
+Default output:
+
+```text
+backtest_records/v6_seed70_100w_2026-01-05_to_latest/
+```
+
+The output includes:
+
+- `trades.csv`: every strategy trade with execution price, shares, amount, costs, cash, position, reason, and detail.
+- `summary.json`: final asset, benchmark comparison, alpha, drawdown, trade count, turnover, orderbook fallback counts, limit-skip counts, regime counts, and data-quality warnings.
+
+## Data Format
+
+Supported historical CSV formats:
+
+- 10-column minute data:
+  `server_time, price, open, high, low, prev_close, cum_volume, cum_amount, tick_vol, tick_amt`
+- 30-column realtime/orderbook data:
+  `local_time_ms, server_time, price, open, high, low, prev_close, cum_volume, cum_amount, bp1..bp5/bv1..bv5/sp1..sp5/sv1..sv5, signal`
+
+The loader sorts by `dt + local_time_ms`, fills missing orderbook fields with `0`, and always recomputes `tick_vol/tick_amt` from cumulative volume and amount.
+
+## Tests
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-测试覆盖：
+The tests cover:
 
-- 分钟线和 3 秒线的 30 分钟因子窗口；
-- 实盘状态保存和恢复；
-- 实时写入器跳过旧行情快照；
-- 历史 loader 重算增量并填充盘口字段；
-- 回测成交价、最低佣金、涨跌停拦截、基准建仓和输出落盘。
+- factor windows for minute and 3-second data
+- V6 realtime state save/restore
+- stale realtime tick skipping
+- loader delta recomputation and orderbook field filling
+- execution price rules, minimum commission, and limit blocking
+- benchmark construction
+- V6 regime and main-flow guard behavior
+- V6 backtest output generation

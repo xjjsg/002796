@@ -1,12 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
 
+# customtkinter ships theme/image assets that must be bundled explicitly.
+customtkinter_datas = collect_data_files('customtkinter')
+
+# Build the GUI entry. Backtest remains a normal CLI script and is not bundled
+# into this windowed executable.
 a = Analysis(
-    ['gui_realtime_002796.py'],
+    ['run_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['combined_strategy_v5', 'strategy_core'],
+    datas=customtkinter_datas,
+    # The refactor moved source into sz002796; keep the package modules explicit
+    # so PyInstaller does not miss lazy imports used by the GUI worker thread.
+    hiddenimports=[
+        'sz002796.config',
+        'sz002796.data_quality',
+        'sz002796.execution',
+        'sz002796.factors',
+        'sz002796.fetcher',
+        'sz002796.gui',
+        'sz002796.market_data',
+        'sz002796.position',
+        'sz002796.regime',
+        'sz002796.state_store',
+        'sz002796.strategy_v6',
+        'sz002796.tick_writer',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

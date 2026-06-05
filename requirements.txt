@@ -1,4 +1,4 @@
-pandas
-customtkinter
-aiohttp
-pyinstaller
+pandas>=3.0,<4
+customtkinter>=5.2,<6
+aiohttp>=3.13,<4
+pyinstaller>=6,<7

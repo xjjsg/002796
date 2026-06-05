@@ -1,0 +1,62 @@
+{
+  "start_time": "2026-01-05 10:34:00",
+  "end_time": "2026-06-05 14:59:51",
+  "start_date": "2026-01-05",
+  "end_date": "2026-06-05",
+  "data_rows": 48939,
+  "data_files": 100,
+  "initial_strategy_target_pct": 0.7,
+  "benchmark_target_pct": 0.7,
+  "initial_seed_trade": true,
+  "strategy_variant": "CombinedStrategyV6",
+  "regime_counts": {
+    "RANGE": 11040,
+    "UPTREND": 7921,
+    "DOWNTREND": 29978
+  },
+  "strategy_final_asset": 1725271.4102,
+  "benchmark_final_asset": 1385166.259,
+  "full_hold_benchmark_final_asset": 1551132.208,
+  "strategy_return": 0.72527141,
+  "benchmark_return": 0.38516626,
+  "full_hold_benchmark_return": 0.55113221,
+  "alpha": 0.34010515,
+  "alpha_vs_full_hold": 0.1741392,
+  "max_drawdown": 0.20953438,
+  "benchmark_max_drawdown": 0.30013428,
+  "full_hold_benchmark_max_drawdown": 0.35443877,
+  "trade_count": 86,
+  "turnover": 29.099332,
+  "final_cash": 735046.4102,
+  "final_shares": 22500,
+  "final_position_pct": 0.57395317,
+  "orderbook_fallback_count": 0,
+  "limit_skip_count": 0,
+  "limit_up_buy_skip_count": 0,
+  "limit_down_sell_skip_count": 0,
+  "benchmark": {
+    "buy_time": "2026-01-05 10:34:00",
+    "buy_price": 28.35,
+    "buy_shares": 24600,
+    "buy_amount": 697410.0,
+    "buy_commission": 69.741,
+    "cash_after_buy": 302520.259,
+    "target_pct": 0.7
+  },
+  "full_hold_benchmark": {
+    "buy_time": "2026-01-05 10:34:00",
+    "buy_price": 28.35,
+    "buy_shares": 35200,
+    "buy_amount": 997920.0,
+    "buy_commission": 99.792,
+    "cash_after_buy": 1980.208,
+    "target_pct": 1.0
+  },
+  "known_data_quality_warnings": [
+    "2026-01-09: 1 price jumps above 8% between samples"
+  ],
+  "outputs": {
+    "trades_csv": "C:\\Users\\Dell\\Documents\\002796\\backtest_records\\v6_seed70_100w_2026-01-05_to_latest\\trades.csv",
+    "summary_json": "C:\\Users\\Dell\\Documents\\002796\\backtest_records\\v6_seed70_100w_2026-01-05_to_latest\\summary.json"
+  }
+}
