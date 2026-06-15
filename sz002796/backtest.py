@@ -38,27 +38,12 @@ from .position import (
     TradeRecord,
     clamp,
 )
+from .trade_records import TRADE_LOG_COLUMNS, trade_to_dict
 
 
 OUTPUT_DIR = Path(BACKTEST_RECORD_DIR)
 
-TRADE_COLUMNS = [
-    "time",
-    "side",
-    "price",
-    "shares",
-    "amount",
-    "commission",
-    "stamp_tax",
-    "cash_after",
-    "position_shares",
-    "asset",
-    "position_pct",
-    "reason",
-    "detail",
-    "execution_source",
-    "orderbook_fallback",
-]
+TRADE_COLUMNS = TRADE_LOG_COLUMNS
 
 @dataclass(frozen=True)
 class BenchmarkPosition:
@@ -106,7 +91,14 @@ def benchmark_all_in(initial_cash: float, buy_price: float, final_price: float) 
 
 
 class V6BacktestExecutionStrategy(CombinedStrategyV6):
-    def __init__(self, initial_capital: float = INITIAL_CAPITAL, min_commission: float = MIN_COMMISSION, **kwargs: Any):
+    def __init__(
+        self,
+        initial_capital: float = INITIAL_CAPITAL,
+        min_commission: float = MIN_COMMISSION,
+        fallback_slippage_ticks: int = 1,
+        tick_size: float = 0.01,
+        **kwargs: Any,
+    ):
         super().__init__(initial_capital=initial_capital, **kwargs)
         self.cash = initial_capital
         self.shares = 0
@@ -114,6 +106,8 @@ class V6BacktestExecutionStrategy(CombinedStrategyV6):
         self.mode = PositionMode.DEFENSE
         self.local_base_target_pct = 0.0
         self.min_commission = min_commission
+        self.fallback_slippage_ticks = fallback_slippage_ticks
+        self.tick_size = tick_size
         self.execution_records: list[dict[str, Any]] = []
         self.orderbook_fallback_count = 0
         self.limit_up_buy_skip_count = 0
@@ -124,6 +118,7 @@ class V6BacktestExecutionStrategy(CombinedStrategyV6):
 
     def on_tick(self, tick: dict[str, Any]) -> TradeRecord | None:
         self._current_tick = tick
+        record_count_before = len(self.execution_records)
         if not self._position_built:
             self.enable_local_t = False
         try:
@@ -135,6 +130,8 @@ class V6BacktestExecutionStrategy(CombinedStrategyV6):
             self._position_built = True
             self.enable_local_t = self._normal_enable_local_t
             self.local_base_target_pct = record.target_pct
+        if record and len(self.execution_records) > record_count_before:
+            self.execution_records[-1]["day_trade_count"] = self.day_trade_count
         return record
 
     def resolve_execution_price(
@@ -146,14 +143,25 @@ class V6BacktestExecutionStrategy(CombinedStrategyV6):
     ) -> tuple[float, str, bool]:
         tick = tick or self._current_tick or {}
         mark_price = float(tick.get("price", tick.get("Close", fallback_price or 0.0)) or fallback_price or 0.0)
+
+        def fallback_with_slippage(source: str) -> tuple[float, str, bool]:
+            if count_fallback:
+                self.orderbook_fallback_count += 1
+            slippage = max(0, self.fallback_slippage_ticks) * self.tick_size
+            if slippage <= 0:
+                return mark_price, source, True
+            if side.upper() == "BUY":
+                return round_price(mark_price + slippage), source + "_slipped", True
+            return max(self.tick_size, round_price(mark_price - slippage)), source + "_slipped", True
+
         if bool(tick.get("_is_realtime", False)):
             field = "sp1" if side.upper() == "BUY" else "bp1"
             quote_price = float(tick.get(field, 0.0) or 0.0)
             if quote_price > 0:
                 return quote_price, field, False
-            if count_fallback:
-                self.orderbook_fallback_count += 1
-            return mark_price, "price_fallback", True
+            return fallback_with_slippage("price_fallback")
+        if bool(tick.get("_is_tick_history", False)):
+            return fallback_with_slippage("tick_history_price")
         return mark_price, "price", False
 
     def _mark_price(self, fallback_price: float) -> float:
@@ -261,26 +269,17 @@ class V6BacktestExecutionStrategy(CombinedStrategyV6):
         orderbook_fallback: bool,
     ) -> None:
         mark_price = self._mark_price(record.price)
-        asset = self.total_asset(mark_price)
-        position_pct = self.current_position_pct(mark_price)
         self.execution_records.append(
-            {
-                "time": record.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                "side": record.side,
-                "price": round(record.price, 4),
-                "shares": record.shares,
-                "amount": round(costs.amount, 4),
-                "commission": round(costs.commission, 4),
-                "stamp_tax": round(costs.stamp_tax, 4),
-                "cash_after": round(record.cash_after, 4),
-                "position_shares": record.position_shares,
-                "asset": round(asset, 4),
-                "position_pct": round(position_pct, 6),
-                "reason": record.reason,
-                "detail": record.detail,
-                "execution_source": execution_source,
-                "orderbook_fallback": orderbook_fallback,
-            }
+            trade_to_dict(
+                record,
+                strategy=self,
+                tick=self._current_tick,
+                source="backtest",
+                costs=costs,
+                execution_source=execution_source,
+                orderbook_fallback=orderbook_fallback,
+                mark_price=mark_price,
+            )
         )
 
 

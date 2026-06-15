@@ -105,10 +105,13 @@ class IntradayFactorCalc:
         self.intraday_low = 0.0
         self.sample_count = 0
         self.below_vwap_count = 0
+        self.below_vwap_seconds = 0.0
+        self.traded_elapsed_seconds = 0.0
         self.opening_range_high = 0.0
         self.opening_range_low = 0.0
-        self.consecutive_above_vwap = 0
-        self.consecutive_below_vwap = 0
+        self.consecutive_above_vwap_seconds = 0.0
+        self.consecutive_below_vwap_seconds = 0.0
+        self.last_history_dt: Optional[datetime] = None
         self.last_snapshot: Optional[FactorSnapshot] = None
 
     @staticmethod
@@ -212,10 +215,13 @@ class IntradayFactorCalc:
         self.intraday_low = min(current_price, intraday_low if intraday_low > 0 else current_price)
         self.sample_count = 0
         self.below_vwap_count = 0
+        self.below_vwap_seconds = 0.0
+        self.traded_elapsed_seconds = 0.0
         self.opening_range_high = current_price
         self.opening_range_low = current_price
-        self.consecutive_above_vwap = 0
-        self.consecutive_below_vwap = 0
+        self.consecutive_above_vwap_seconds = 0.0
+        self.consecutive_below_vwap_seconds = 0.0
+        self.last_history_dt = None
         self.last_snapshot = None
 
     def update(self, tick: Dict[str, Any], is_new_day: bool) -> FactorSnapshot:
@@ -235,6 +241,11 @@ class IntradayFactorCalc:
 
         if is_new_day:
             self.reset(prev_close, current_price, open_price, day_high, day_low)
+
+        elapsed_seconds = 0.0
+        if self.last_history_dt is not None:
+            elapsed_seconds = max(0.0, (history_dt - self.last_history_dt).total_seconds())
+        self.last_history_dt = history_dt
 
         has_direct_vol = "tick_vol" in tick
         has_direct_amt = "tick_amt" in tick
@@ -272,18 +283,21 @@ class IntradayFactorCalc:
         if time_str <= "10:00:00":
             self.opening_range_high = max(self.opening_range_high, current_price)
             self.opening_range_low = min(self.opening_range_low, current_price)
-        new_high_event = 1.0 if self.sample_count > 0 and current_price >= prev_intraday_high else 0.0
-        new_low_event = 1.0 if self.sample_count > 0 and current_price <= prev_intraday_low else 0.0
+        event_weight_minutes = elapsed_seconds / 60.0
+        new_high_event = event_weight_minutes if self.sample_count > 0 and current_price >= prev_intraday_high else 0.0
+        new_low_event = event_weight_minutes if self.sample_count > 0 and current_price <= prev_intraday_low else 0.0
         self.new_high_history.append((history_dt, new_high_event))
         self.new_low_history.append((history_dt, new_low_event))
         self.sample_count += 1
+        self.traded_elapsed_seconds += elapsed_seconds
         if current_price < self.vwap:
             self.below_vwap_count += 1
-            self.consecutive_below_vwap += 1
-            self.consecutive_above_vwap = 0
+            self.below_vwap_seconds += elapsed_seconds
+            self.consecutive_below_vwap_seconds += elapsed_seconds
+            self.consecutive_above_vwap_seconds = 0.0
         elif current_price > self.vwap:
-            self.consecutive_above_vwap += 1
-            self.consecutive_below_vwap = 0
+            self.consecutive_above_vwap_seconds += elapsed_seconds
+            self.consecutive_below_vwap_seconds = 0.0
 
         self.price_history.append((history_dt, current_price))
         self.vol_history.append((history_dt, delta_vol))
@@ -337,7 +351,11 @@ class IntradayFactorCalc:
         pullback_from_high = current_price / self.intraday_high - 1.0 if self.intraday_high > 0 else 0.0
         day_range = self.intraday_high - self.intraday_low
         range_position = (current_price - self.intraday_low) / day_range if day_range > 0 else 0.5
-        below_vwap_ratio = self.below_vwap_count / self.sample_count if self.sample_count > 0 else 0.0
+        below_vwap_ratio = (
+            self.below_vwap_seconds / self.traded_elapsed_seconds
+            if self.traded_elapsed_seconds > 0
+            else 0.0
+        )
         vwap_slope_15m = 0.0
         vwap_15m = self._value_at_or_before(self.vwap_history, history_dt - self.vwap_slope_15m_window)
         if vwap_15m is not None and vwap_15m > 0:
@@ -390,8 +408,8 @@ class IntradayFactorCalc:
             opening_range_position=opening_range_position,
             break_opening_high=break_opening_high,
             break_opening_low=break_opening_low,
-            consecutive_above_vwap=float(self.consecutive_above_vwap),
-            consecutive_below_vwap=float(self.consecutive_below_vwap),
+            consecutive_above_vwap=self.consecutive_above_vwap_seconds / 60.0,
+            consecutive_below_vwap=self.consecutive_below_vwap_seconds / 60.0,
             new_high_count_30m=new_high_count_30m,
             new_low_count_30m=new_low_count_30m,
             bid_depth=bid_depth,

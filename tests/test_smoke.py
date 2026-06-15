@@ -4,6 +4,8 @@ These tests cover the behaviors that must not drift during cleanup: factor
 windows, state replay, stale tick filtering, execution-cost rules, regime
 guardrails, and independent backtest output generation.
 """
+import csv
+import asyncio
 import tempfile
 import unittest
 import json
@@ -14,8 +16,18 @@ from sz002796.strategy_v6 import CombinedStrategyV6
 from sz002796.config import INITIAL_CAPITAL
 from sz002796.position import PositionMode, TradeRecord
 from sz002796.state_store import StrategyStateStore
+from sz002796.trade_records import TRADE_LOG_COLUMNS, read_trade_rows
 from sz002796.tick_writer import TickDataWriter
-from sz002796.market_data import load_market_data
+from sz002796.market_data import load_market_data, row_to_tick
+from sz002796.realtime_sources import (
+    FallbackMarketDataSource,
+    QmtMarketDataSource,
+    RealtimeMarketSource,
+    create_market_data_source,
+    gui_symbol_to_qmt_symbol,
+    normalize_market_source_id,
+)
+from sz002796.gui import TickChartBuffer
 from sz002796.regime import MarketRegime, MarketRegimeDecision, MarketRegimeEngine
 from sz002796.backtest import (
     BENCHMARK_TARGET_PCT,
@@ -46,7 +58,262 @@ def make_tick(dt: datetime, price: float, idx: int) -> dict:
     }
 
 
+def fixed_regime_decision(floor_pct: float = 0.40) -> MarketRegimeDecision:
+    return MarketRegimeDecision(
+        regime=MarketRegime.RANGE,
+        tags=("test",),
+        confidence=0.8,
+        target_floor_pct=floor_pct,
+        target_ceiling_pct=1.0,
+        regime_score=0.0,
+        detail="test",
+        allow_cross_day=True,
+        allow_local_t=True,
+    )
+
+
 class SmokeTests(unittest.TestCase):
+    def test_realtime_source_selection_and_symbol_mapping(self):
+        self.assertEqual(normalize_market_source_id("QMT"), "qmt")
+        self.assertEqual(normalize_market_source_id("现有接口"), "tencent")
+        self.assertEqual(gui_symbol_to_qmt_symbol("sz002796"), "002796.SZ")
+        self.assertEqual(create_market_data_source("现有接口", "sz002796").source_id, "tencent")
+
+    def test_qmt_market_source_drains_to_latest_tick(self):
+        class FakeFeed:
+            def __init__(self):
+                self.started = False
+                self.stopped = False
+                self.queue = [
+                    {"Time": datetime(2026, 6, 10, 9, 30, 0), "server_time": "09:30:00", "price": 10.0},
+                    {"Time": datetime(2026, 6, 10, 9, 30, 3), "server_time": "09:30:03", "price": 10.2},
+                ]
+
+            def start(self):
+                self.started = True
+
+            def wait_next(self, timeout=None):
+                if self.queue:
+                    return self.queue.pop(0)
+                return None
+
+            def stop(self):
+                self.stopped = True
+
+        async def run_source():
+            feed = FakeFeed()
+            source = QmtMarketDataSource("sz002796", feed=feed, queue_timeout_seconds=0)
+            await source.start()
+            tick = await source.fetch()
+            await source.close()
+            return feed, tick
+
+        feed, tick = asyncio.run(run_source())
+
+        self.assertTrue(feed.started)
+        self.assertTrue(feed.stopped)
+        self.assertEqual(tick["price"], 10.2)
+        self.assertEqual(tick["market_source"], "qmt")
+        self.assertEqual(tick["market_source_label"], "QMT")
+
+    def test_qmt_market_source_falls_back_to_tencent_on_start_failure(self):
+        class BrokenQmtSource(RealtimeMarketSource):
+            source_id = "qmt"
+            label = "QMT"
+
+            async def start(self):
+                raise RuntimeError("xtquant missing")
+
+        class BackupSource(RealtimeMarketSource):
+            source_id = "tencent"
+            label = "现有接口"
+
+            def __init__(self):
+                self.started = False
+
+            async def start(self):
+                self.started = True
+
+            async def fetch(self):
+                return self._mark_tick(
+                    {
+                        "Time": datetime(2026, 6, 10, 9, 30, 3),
+                        "server_time": "09:30:03",
+                        "price": 10.3,
+                    }
+                )
+
+        async def run_source():
+            backup = BackupSource()
+            source = FallbackMarketDataSource(BrokenQmtSource(), backup)
+            await source.start()
+            events = source.pop_status_events()
+            tick = await source.fetch()
+            return backup, events, tick
+
+        backup, events, tick = asyncio.run(run_source())
+
+        self.assertTrue(backup.started)
+        self.assertIn("已自动切换到 现有接口", events[0])
+        self.assertEqual(tick["market_source"], "tencent")
+        self.assertTrue(tick["market_source_fallback"])
+        self.assertEqual(tick["requested_market_source"], "qmt")
+
+    def test_qmt_market_source_falls_back_to_tencent_on_fetch_exception(self):
+        class BrokenQmtSource(RealtimeMarketSource):
+            source_id = "qmt"
+            label = "QMT"
+
+            async def start(self):
+                return None
+
+            async def fetch(self):
+                raise RuntimeError("qmt fetch failed")
+
+        class BackupSource(RealtimeMarketSource):
+            source_id = "tencent"
+            label = "现有接口"
+
+            async def start(self):
+                return None
+
+            async def fetch(self):
+                return self._mark_tick(
+                    {
+                        "Time": datetime(2026, 6, 10, 9, 30, 6),
+                        "server_time": "09:30:06",
+                        "price": 10.4,
+                    }
+                )
+
+        async def run_source():
+            source = FallbackMarketDataSource(BrokenQmtSource(), BackupSource())
+            await source.start()
+            tick = await source.fetch()
+            return source.pop_status_events(), tick
+
+        events, tick = asyncio.run(run_source())
+
+        self.assertIn("QMT 行情失败", events[0])
+        self.assertEqual(tick["market_source"], "tencent")
+        self.assertTrue(tick["market_source_fallback"])
+
+    def test_qmt_market_source_falls_back_on_callback_error(self):
+        class Stats:
+            last_error = "callback broken"
+
+        class FakeFeed:
+            stats = Stats()
+
+            def start(self):
+                return 1
+
+            def wait_next(self, timeout=None):
+                return {
+                    "Time": datetime(2026, 6, 10, 9, 30, 9),
+                    "server_time": "09:30:09",
+                    "price": 10.5,
+                }
+
+            def stop(self):
+                return None
+
+        class BackupSource(RealtimeMarketSource):
+            source_id = "tencent"
+            label = "现有接口"
+
+            async def start(self):
+                return None
+
+            async def fetch(self):
+                return self._mark_tick(
+                    {
+                        "Time": datetime(2026, 6, 10, 9, 30, 12),
+                        "server_time": "09:30:12",
+                        "price": 10.6,
+                    }
+                )
+
+        async def run_source():
+            primary = QmtMarketDataSource("sz002796", feed=FakeFeed(), queue_timeout_seconds=0)
+            source = FallbackMarketDataSource(primary, BackupSource())
+            await source.start()
+            tick = await source.fetch()
+            return source.pop_status_events(), tick
+
+        events, tick = asyncio.run(run_source())
+
+        self.assertIn("QMT 行情失败", events[0])
+        self.assertEqual(tick["market_source"], "tencent")
+        self.assertTrue(tick["market_source_fallback"])
+
+    def test_qmt_market_source_falls_back_after_no_tick_timeout(self):
+        now = {"value": 0.0}
+
+        class EmptyQmtSource(RealtimeMarketSource):
+            source_id = "qmt"
+            label = "QMT"
+
+            async def start(self):
+                return None
+
+            async def fetch(self):
+                return None
+
+        class BackupSource(RealtimeMarketSource):
+            source_id = "tencent"
+            label = "现有接口"
+
+            async def start(self):
+                return None
+
+            async def fetch(self):
+                return self._mark_tick(
+                    {
+                        "Time": datetime(2026, 6, 10, 9, 30, 15),
+                        "server_time": "09:30:15",
+                        "price": 10.7,
+                    }
+                )
+
+        async def run_source():
+            source = FallbackMarketDataSource(
+                EmptyQmtSource(),
+                BackupSource(),
+                no_tick_timeout_seconds=30.0,
+                clock=lambda: now["value"],
+            )
+            await source.start()
+            self.assertIsNone(await source.fetch())
+            now["value"] = 31.0
+            tick = await source.fetch()
+            return source.pop_status_events(), tick
+
+        events, tick = asyncio.run(run_source())
+
+        self.assertIn("无有效 tick", events[0])
+        self.assertEqual(tick["market_source"], "tencent")
+        self.assertTrue(tick["market_source_fallback"])
+
+    def test_tick_chart_buffer_caps_points_and_handles_flat_prices(self):
+        chart = TickChartBuffer(max_points=3)
+        for idx in range(5):
+            chart.append(
+                {
+                    "Time": datetime(2026, 6, 10, 9, 30, idx),
+                    "server_time": f"09:30:0{idx}",
+                    "price": 10.0,
+                }
+            )
+
+        low, high = chart.price_bounds()
+        scaled = chart.scaled_points(320, 180)
+
+        self.assertEqual(len(chart.points), 3)
+        self.assertLess(low, high)
+        self.assertEqual(len(scaled), 3)
+        self.assertTrue(all(0 <= x <= 320 and 0 <= y <= 180 for x, y in scaled))
+
     def test_local_vwap_uses_time_window_for_minute_data(self):
         calc = IntradayFactorCalc(local_window=30)
         start = datetime(2026, 6, 1, 9, 30)
@@ -67,6 +334,20 @@ class SmokeTests(unittest.TestCase):
             snapshot = calc.update(make_tick(start + elapsed, price, idx), idx == 0)
         self.assertIsNotNone(snapshot)
         self.assertAlmostEqual(snapshot.local_vwap, 20.0, places=6)
+
+    def test_consecutive_vwap_duration_is_time_normalized(self):
+        calc = IntradayFactorCalc(local_window=30)
+        start = datetime(2026, 6, 1, 9, 30)
+        snapshot = None
+        for idx, price in enumerate([10.0, 11.0, 11.0, 11.0]):
+            tick = make_tick(start + timedelta(minutes=idx), price, idx)
+            tick["Volume"] = 0
+            tick["Amount"] = 0
+            snapshot = calc.update(tick, idx == 0)
+
+        self.assertIsNotNone(snapshot)
+        self.assertAlmostEqual(snapshot.consecutive_above_vwap, 3.0, places=6)
+        self.assertAlmostEqual(snapshot.consecutive_below_vwap, 0.0, places=6)
 
     def test_strategy_state_round_trip(self):
         tmp = Path(tempfile.mkdtemp())
@@ -118,6 +399,11 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(restored.market_regime.current_day.date, "2026-06-01")
         self.assertEqual(len(restored.trades), 1)
         self.assertTrue(trade_path.exists())
+        header = trade_path.read_text(encoding="utf-8-sig").splitlines()[0].split(",")
+        self.assertEqual(header, TRADE_LOG_COLUMNS)
+        rows = read_trade_rows(str(trade_path))
+        self.assertEqual(rows[0]["source"], "runtime")
+        self.assertEqual(rows[0]["timestamp"], "2026-06-01 14:00:00")
         self.assertEqual(loaded["position_replay"]["source"], "runtime")
         self.assertEqual(loaded["position_replay"]["replayed_count"], 1)
 
@@ -180,6 +466,61 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(loaded["position_replay"]["source"], "backtest")
         self.assertEqual(loaded["position_replay"]["seed_rows"], 2)
         self.assertEqual(loaded["position_replay"]["runtime_rows"], 0)
+
+    def test_strategy_state_replays_unified_backtest_and_runtime_schema(self):
+        tmp = Path(tempfile.mkdtemp())
+        state_path = tmp / "state.json"
+        runtime_trade_path = tmp / "runtime_trades.csv"
+        backtest_trade_path = tmp / "backtest_trades.csv"
+        with backtest_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-01-05 10:34:00",
+                    "source": "backtest",
+                    "side": "BUY",
+                    "price": 10.0,
+                    "shares": 100,
+                    "target_pct": 0.10,
+                    "mode": "DEFENSE",
+                    "reason": "seed",
+                    "detail": "unified",
+                }
+            )
+        with runtime_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-01-05 14:00:00",
+                    "source": "runtime",
+                    "side": "SELL",
+                    "price": 11.0,
+                    "shares": 100,
+                    "target_pct": 0.0,
+                    "mode": "DEFENSE",
+                    "reason": "runtime exit",
+                    "detail": "unified",
+                }
+            )
+
+        store = StrategyStateStore(
+            str(state_path),
+            str(runtime_trade_path),
+            seed_trade_log_path=str(backtest_trade_path),
+            seed_cash=1_000_000.0,
+            seed_shares=0,
+            seed_target_pct=0.0,
+        )
+        restored = CombinedStrategyV6(initial_capital=INITIAL_CAPITAL)
+        loaded = store.load(restored)
+
+        self.assertEqual(restored.shares, 0)
+        self.assertAlmostEqual(restored.cash, 1_000_000.0 - 1005.0 + 1094.45)
+        self.assertEqual(loaded["position_replay"]["source"], "backtest+runtime")
+        self.assertEqual(loaded["position_replay"]["seed_rows"], 1)
+        self.assertEqual(loaded["position_replay"]["runtime_rows"], 1)
 
     def test_mismatched_state_is_ignored(self):
         tmp = Path(tempfile.mkdtemp())
@@ -252,6 +593,27 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(list(bundle.frame["tick_amt"]), [1000.0, 525.0])
         self.assertEqual(float(bundle.frame.iloc[0]["bp1"]), 0.0)
         self.assertFalse(bool(bundle.frame.iloc[0]["is_realtime"]))
+        self.assertFalse(bool(bundle.frame.iloc[0]["is_tick_history"]))
+
+    def test_market_loader_marks_dense_non_orderbook_files_as_tick_history(self):
+        tmp = Path(tempfile.mkdtemp())
+        csv_path = tmp / "sz002796-2026-01-05.csv"
+        rows = ["server_time,price,open,high,low,prev_close,cum_volume,cum_amount,tick_vol,tick_amt\n"]
+        start = datetime(2026, 1, 5, 9, 30)
+        for idx in range(1001):
+            dt = start + timedelta(seconds=idx)
+            price = 10.0 + idx * 0.0001
+            rows.append(
+                f"{dt:%H:%M:%S},{price:.4f},10,10.2,9.9,9.8,{idx + 1},{(idx + 1) * price:.4f},1,{price:.4f}\n"
+            )
+        csv_path.write_text("".join(rows), encoding="utf-8")
+
+        bundle = load_market_data(data_dir=tmp, start_date="2026-01-05")
+        tick = row_to_tick(bundle.frame.iloc[0])
+
+        self.assertTrue(bool(bundle.frame.iloc[0]["is_tick_history"]))
+        self.assertTrue(tick["_is_tick_history"])
+        self.assertFalse(tick["_is_realtime"])
 
     def test_minute_execution_price_uses_price(self):
         strategy = V6BacktestExecutionStrategy()
@@ -281,10 +643,25 @@ class SmokeTests(unittest.TestCase):
 
         price, source, fallback = strategy.resolve_execution_price("BUY", tick, count_fallback=True)
 
-        self.assertEqual(price, 10.0)
-        self.assertEqual(source, "price_fallback")
+        self.assertEqual(price, 10.01)
+        self.assertEqual(source, "price_fallback_slipped")
         self.assertTrue(fallback)
         self.assertEqual(strategy.orderbook_fallback_count, 1)
+
+    def test_tick_history_without_orderbook_uses_conservative_slippage(self):
+        strategy = V6BacktestExecutionStrategy()
+        tick = {"price": 10.0, "_is_tick_history": True}
+
+        buy_price, buy_source, buy_fallback = strategy.resolve_execution_price("BUY", tick, count_fallback=True)
+        sell_price, sell_source, sell_fallback = strategy.resolve_execution_price("SELL", tick, count_fallback=True)
+
+        self.assertEqual(buy_price, 10.01)
+        self.assertEqual(buy_source, "tick_history_price_slipped")
+        self.assertTrue(buy_fallback)
+        self.assertEqual(sell_price, 9.99)
+        self.assertEqual(sell_source, "tick_history_price_slipped")
+        self.assertTrue(sell_fallback)
+        self.assertEqual(strategy.orderbook_fallback_count, 2)
 
     def test_minimum_commission_is_applied(self):
         buy_costs = calculate_trade_costs("BUY", 10.0, 100)
@@ -349,7 +726,9 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(summary["benchmark_target_pct"], BENCHMARK_TARGET_PCT)
         self.assertTrue(summary["initial_seed_trade"])
         trades = (out_dir / "trades.csv").read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(trades[0].split(","), TRADE_LOG_COLUMNS)
         self.assertIn("initial 70% base position", trades[1])
+        self.assertIn(",backtest,", trades[1])
         self.assertEqual(summary["known_data_quality_warnings"], [])
         for forbidden in ("strategy_state", "strategy_trades"):
             self.assertNotIn(forbidden, source)
@@ -452,6 +831,79 @@ class SmokeTests(unittest.TestCase):
 
         self.assertIsNone(record)
         self.assertEqual(calls, [])
+
+    def test_local_short_refill_lock_is_disabled_by_default(self):
+        strategy = CombinedStrategyV6()
+        strategy.current_date = "2026-06-01"
+        strategy.cash = 8000.0
+        strategy.shares = 300
+        strategy.target_pct = 0.30
+        strategy.local_base_target_pct = 0.70
+        strategy.local_t_cycle = "short"
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 45)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        calls = []
+
+        def capture_align(*args, **kwargs):
+            calls.append((args, kwargs))
+            return None
+
+        strategy._align_to_target = capture_align
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 10.0, 1))
+
+        self.assertIsNone(record)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][3], "V6 floor refill")
+
+    def test_local_short_refill_lock_skips_refill_above_hard_floor(self):
+        strategy = CombinedStrategyV6(protect_local_short_floor_refill=True)
+        strategy.current_date = "2026-06-01"
+        strategy.cash = 8000.0
+        strategy.shares = 300
+        strategy.target_pct = 0.30
+        strategy.local_base_target_pct = 0.70
+        strategy.local_t_cycle = "short"
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 45)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        calls = []
+
+        def fail_if_align_called(*args, **kwargs):
+            calls.append((args, kwargs))
+            return None
+
+        strategy._align_to_target = fail_if_align_called
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 10.0, 1))
+
+        self.assertIsNone(record)
+        self.assertEqual(calls, [])
+        self.assertEqual(strategy.local_t_cycle, "short")
+
+    def test_local_short_refill_lock_allows_hard_floor_refill(self):
+        strategy = CombinedStrategyV6(protect_local_short_floor_refill=True)
+        strategy.current_date = "2026-06-01"
+        strategy.cash = 10000.0
+        strategy.shares = 100
+        strategy.target_pct = 0.10
+        strategy.local_base_target_pct = 0.70
+        strategy.local_t_cycle = "short"
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 45)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 10.0, 1))
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.reason, "V6 local short hard-floor refill")
+        self.assertEqual(record.side, "BUY")
+        self.assertGreater(record.shares, 0)
+        self.assertIn("short_refill_lock=1", record.detail)
+        self.assertEqual(strategy.local_t_cycle, "short")
+        self.assertEqual(strategy.day_trade_count, 1)
+        self.assertEqual(strategy.last_trade_dt, datetime(2026, 6, 1, 13, 0))
 
     def test_v6_backtest_writes_independent_outputs(self):
         tmp = Path(tempfile.mkdtemp())

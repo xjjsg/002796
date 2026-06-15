@@ -8,7 +8,7 @@ import os
 import csv
 import json
 from datetime import datetime
-from typing import Any, Optional, Tuple, List, Dict
+from typing import Any
 
 from .config import (
     INITIAL_CASH, INITIAL_SHARES, INITIAL_TARGET_PCT, INITIAL_CAPITAL,
@@ -16,7 +16,17 @@ from .config import (
     BACKTEST_TRADE_LOG_FILE, parse_dt
 )
 from .position import PositionMode, TradeRecord
-from .execution import calculate_trade_costs
+from .trade_records import (
+    TRADE_LOG_COLUMNS,
+    apply_trade_row,
+    ensure_trade_log_schema,
+    mode_from_target_pct,
+    read_trade_rows,
+    replay_trade_rows,
+    trade_from_dict,
+    trade_identity,
+    trade_to_dict,
+)
 
 class StrategyStateStore:
     def __init__(
@@ -61,49 +71,11 @@ class StrategyStateStore:
 
     @staticmethod
     def _trade_log_fieldnames() -> list[str]:
-        return [
-            "timestamp",
-            "tick_time",
-            "side",
-            "price",
-            "last_price",
-            "shares",
-            "amount",
-            "commission",
-            "stamp_tax",
-            "position_shares",
-            "cash_after",
-            "asset_after",
-            "position_pct_after",
-            "target_pct",
-            "mode",
-            "day_trade_count",
-            "reason",
-            "detail",
-            "day_vwap_dev",
-            "local_vwap_dev",
-            "velocity",
-            "acceleration",
-            "vol_mom",
-            "day_return",
-            "vwap",
-            "local_vwap",
-            "range_position",
-            "orderbook_imbalance",
-            "cross_buy_score",
-            "cross_sell_score",
-            "local_trim_score",
-            "local_cover_score",
-            "buy_timing_score",
-            "sell_timing_score",
-        ]
+        return TRADE_LOG_COLUMNS
 
     @staticmethod
     def _read_csv_rows(path: str | None) -> list[dict]:
-        if not path or not os.path.exists(path):
-            return []
-        with open(path, "r", newline="", encoding="utf-8-sig") as f:
-            return list(csv.DictReader(f))
+        return read_trade_rows(path)
 
     def _read_trade_rows(self) -> list[dict]:
         return self._read_csv_rows(self.trade_log_path)
@@ -116,14 +88,7 @@ class StrategyStateStore:
 
     @staticmethod
     def _trade_identity(row: dict) -> tuple[str, str, str, str, str, str]:
-        return (
-            str(row.get("timestamp") or row.get("time") or ""),
-            str(row.get("side") or ""),
-            str(row.get("price") or ""),
-            str(row.get("shares") or ""),
-            str(row.get("reason") or ""),
-            str(row.get("detail") or ""),
-        )
+        return trade_identity(row)
 
     def _read_position_rows(self) -> tuple[list[dict], dict]:
         seed_rows = self._read_csv_rows(self.seed_trade_log_path) if self._seed_available() else []
@@ -156,26 +121,7 @@ class StrategyStateStore:
         }
 
     def _ensure_trade_log_schema(self, required_fields: list[str]) -> list[str]:
-        if not os.path.exists(self.trade_log_path) or os.path.getsize(self.trade_log_path) == 0:
-            return required_fields
-
-        with open(self.trade_log_path, "r", newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            old_fields = reader.fieldnames or []
-            rows = list(reader)
-
-        merged_fields = required_fields + [field for field in old_fields if field not in required_fields]
-        if old_fields == merged_fields:
-            return merged_fields
-
-        tmp_path = self.trade_log_path + ".tmp"
-        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=merged_fields, extrasaction="ignore")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-        os.replace(tmp_path, self.trade_log_path)
-        return merged_fields
+        return ensure_trade_log_schema(self.trade_log_path, required_fields)
 
     @classmethod
     def _trade_sort_key(cls, item: tuple[int, dict]) -> tuple[datetime, int]:
@@ -192,67 +138,7 @@ class StrategyStateStore:
         last_target_pct: float,
         last_mode: PositionMode,
     ) -> tuple[float, int, float, PositionMode, TradeRecord | None, dict, str | None]:
-        side = str(row.get("side", "") or "").upper()
-        price = float(row.get("price", 0.0) or 0.0)
-        requested_shares = int(float(row.get("shares", 0) or 0))
-        traded_shares = int(requested_shares / LOT_SIZE) * LOT_SIZE
-        timestamp = parse_dt(row.get("timestamp") or row.get("time")) or datetime.now()
-        target_pct = cls._safe_float(row.get("target_pct"))
-        if target_pct is None:
-            target_pct = cls._safe_float(row.get("position_pct"))
-        if target_pct is None:
-            target_pct = last_target_pct
-
-        mode_value = str(row.get("mode", "") or "")
-        try:
-            mode = PositionMode(mode_value) if mode_value else cls._mode_from_target_pct(target_pct)
-        except ValueError:
-            mode = cls._mode_from_target_pct(target_pct)
-
-        reason = str(row.get("reason", "") or "")
-        detail = str(row.get("detail", "") or "")
-        warning = None
-
-        if side not in {"BUY", "SELL"} or price <= 0 or traded_shares <= 0:
-            return cash, shares, target_pct, mode, None, {}, f"ignored invalid trade row at {timestamp.isoformat()}"
-
-        if side == "SELL" and traded_shares > shares:
-            warning = f"sell shares capped from {traded_shares} to {shares} at {timestamp.isoformat()}"
-            traded_shares = int(shares / LOT_SIZE) * LOT_SIZE
-            if traded_shares <= 0:
-                return cash, shares, target_pct, mode, None, {}, warning
-
-        costs = calculate_trade_costs(side, price, traded_shares)
-        if side == "BUY":
-            cash -= costs.buy_cash_required
-            shares += traded_shares
-        else:
-            cash += costs.sell_cash_received
-            shares -= traded_shares
-
-        record = TradeRecord(
-            timestamp=timestamp,
-            side=side,
-            price=price,
-            shares=traded_shares,
-            position_shares=shares,
-            cash_after=cash,
-            target_pct=target_pct,
-            mode=mode.value,
-            reason=reason,
-            detail=detail,
-        )
-        cost_row = {
-            "shares": traded_shares,
-            "amount": costs.amount,
-            "commission": costs.commission,
-            "stamp_tax": costs.stamp_tax,
-            "position_shares": shares,
-            "cash_after": cash,
-            "target_pct": target_pct,
-            "mode": mode.value,
-        }
-        return cash, shares, target_pct, mode, record, cost_row, warning
+        return apply_trade_row(row, cash, shares, last_target_pct, last_mode)
 
     @classmethod
     def _replay_trade_rows(
@@ -262,34 +148,11 @@ class StrategyStateStore:
         initial_shares: int = INITIAL_SHARES,
         initial_target_pct: float = INITIAL_TARGET_PCT,
     ) -> tuple[float, int, float, PositionMode, list[TradeRecord], list[str]]:
-        cash = initial_cash
-        shares = initial_shares
-        target_pct = initial_target_pct
-        mode = cls._mode_from_target_pct(target_pct)
-        records: list[TradeRecord] = []
-        warnings: list[str] = []
-
-        for _, row in sorted(enumerate(rows), key=cls._trade_sort_key):
-            cash, shares, target_pct, mode, record, _, warning = cls._apply_trade_row(
-                row,
-                cash,
-                shares,
-                target_pct,
-                mode,
-            )
-            if warning:
-                warnings.append(warning)
-            if record is not None:
-                records.append(record)
-        return cash, shares, target_pct, mode, records, warnings
+        return replay_trade_rows(rows, initial_cash, initial_shares, initial_target_pct)
 
     @staticmethod
     def _mode_from_target_pct(target_pct: float) -> PositionMode:
-        if target_pct < ANCHOR_PCT - 0.03:
-            return PositionMode.DEFENSE
-        if target_pct > ANCHOR_PCT + 0.03:
-            return PositionMode.ATTACK
-        return PositionMode.NEUTRAL
+        return mode_from_target_pct(target_pct)
 
     @staticmethod
     def _trade_to_dict(
@@ -297,66 +160,11 @@ class StrategyStateStore:
         strategy: Any | None = None,
         tick: dict | None = None,
     ) -> dict:
-        row = {
-            "timestamp": trade.timestamp.isoformat(),
-            "side": trade.side,
-            "price": trade.price,
-            "shares": trade.shares,
-            "position_shares": trade.position_shares,
-            "cash_after": trade.cash_after,
-            "target_pct": trade.target_pct,
-            "mode": trade.mode,
-            "reason": trade.reason,
-            "detail": trade.detail,
-        }
-        if tick:
-            row["tick_time"] = tick.get("server_time", "")
-            row["last_price"] = tick.get("price", tick.get("Close", ""))
-
-        if strategy is not None:
-            current_price = float(row.get("last_price") or trade.price)
-            row["asset_after"] = strategy.total_asset(current_price)
-            row["position_pct_after"] = strategy.current_position_pct(current_price)
-            row["day_trade_count"] = strategy.day_trade_count
-            snapshot = strategy.factor_calc.last_snapshot
-            if snapshot is not None:
-                row.update(
-                    {
-                        "day_vwap_dev": snapshot.day_vwap_dev,
-                        "local_vwap_dev": snapshot.local_vwap_dev,
-                        "velocity": snapshot.velocity,
-                        "acceleration": snapshot.acceleration,
-                        "vol_mom": snapshot.vol_mom,
-                        "day_return": snapshot.day_return,
-                        "vwap": snapshot.vwap,
-                        "local_vwap": snapshot.local_vwap,
-                        "range_position": snapshot.range_position,
-                        "orderbook_imbalance": snapshot.orderbook_imbalance,
-                        "cross_buy_score": strategy._score_cross_buy(snapshot),
-                        "cross_sell_score": strategy._score_cross_sell(snapshot),
-                        "local_trim_score": strategy._score_local_trim(snapshot),
-                        "local_cover_score": strategy._score_local_cover(snapshot),
-                        "buy_timing_score": strategy._score_buy_timing(snapshot),
-                        "sell_timing_score": strategy._score_sell_timing(snapshot),
-                    }
-                )
-        return row
+        return trade_to_dict(trade, strategy=strategy, tick=tick, source="runtime")
 
     @staticmethod
     def _trade_from_dict(row: dict) -> TradeRecord:
-        timestamp = parse_dt(row.get("timestamp") or row.get("time")) or datetime.now()
-        return TradeRecord(
-            timestamp=timestamp,
-            side=str(row.get("side", "")),
-            price=float(row.get("price", 0.0) or 0.0),
-            shares=int(row.get("shares", 0) or 0),
-            position_shares=int(row.get("position_shares", 0) or 0),
-            cash_after=float(row.get("cash_after", 0.0) or 0.0),
-            target_pct=float(row.get("target_pct", 0.0) or 0.0),
-            mode=str(row.get("mode", PositionMode.NEUTRAL.value)),
-            reason=str(row.get("reason", "")),
-            detail=str(row.get("detail", "")),
-        )
+        return trade_from_dict(row)
 
     def reconcile_from_trade_log(self, strategy: Any, state: dict | None = None) -> dict:
         rows, source_info = self._read_position_rows()

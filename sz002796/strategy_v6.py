@@ -42,7 +42,7 @@ class CombinedStrategyV6(BaseStrategy):
         cross_buy_execute_time: str = "14:00:00",
         cross_enter_score: float = 0.25,
         cross_target_sensitivity: float = 0.38,
-        local_enter_score: float = 0.70,
+        local_enter_score: float = 0.80,
         local_cover_enter_score: float = 0.85,
         local_trim_band: float = 0.18,
         local_cover_band: float = 0.06,
@@ -60,8 +60,9 @@ class CombinedStrategyV6(BaseStrategy):
         regime_rebalance_margin: float = 0.03,
         enable_main_flow_guard: bool = True,
         main_flow_guard_start_time: str = "10:30:00",
-        main_flow_guard_score: float = 0.60,
+        main_flow_guard_score: float = 0.50,
         main_flow_guard_target_pct: float = 0.40,
+        protect_local_short_floor_refill: bool = False,
         verbose: bool = False,
     ):
         super().__init__(
@@ -111,6 +112,7 @@ class CombinedStrategyV6(BaseStrategy):
         self.main_flow_guard_start_time = main_flow_guard_start_time
         self.main_flow_guard_score = main_flow_guard_score
         self.main_flow_guard_target_pct = main_flow_guard_target_pct
+        self.protect_local_short_floor_refill = protect_local_short_floor_refill
         self.main_flow_guard_date: Optional[str] = None
         self.main_flow_guard_floor_pct: Optional[float] = None
 
@@ -123,6 +125,25 @@ class CombinedStrategyV6(BaseStrategy):
         if self.enable_market_regime and self.regime_decision is not None:
             return self.regime_decision.target_floor_pct
         return self.floor_pct
+
+    def _local_short_hard_floor_pct(self, active_floor: float) -> float:
+        return clamp(max(self.floor_pct, active_floor - self.local_trim_band), self.floor_pct, self.ceil_pct)
+
+    def _protected_floor_refill_target(
+        self,
+        current_pct: float,
+        active_floor: float,
+    ) -> tuple[Optional[float], bool]:
+        if not (
+            self.protect_local_short_floor_refill
+            and self.local_t_cycle == "short"
+            and self.local_t_entry_shares > 0
+        ):
+            return active_floor, False
+        hard_floor = self._local_short_hard_floor_pct(active_floor)
+        if current_pct >= hard_floor - 0.005:
+            return None, True
+        return hard_floor, True
 
     def _allow_cross_day_signals(self) -> bool:
         decision = self.regime_decision
@@ -314,22 +335,34 @@ class CombinedStrategyV6(BaseStrategy):
             return None
 
         floor_target = self._active_regime_floor_pct()
+        floor_target, protected_short = self._protected_floor_refill_target(current_pct, floor_target)
+        if floor_target is None:
+            return None
+
         restore_start_time = "10:00:00" if decision.regime == MarketRegime.UPTREND else self.cross_buy_execute_time
         if current_pct < floor_target - margin and time_str >= restore_start_time:
+            reason = "V6 local short hard-floor restore" if protected_short else "V6 regime floor restore"
+            detail = decision.detail + self._regime_suffix()
+            if protected_short:
+                detail = (
+                    detail
+                    + f" short_refill_lock=1 hard_floor={floor_target*100:.1f}%"
+                ).strip()
             record = super()._align_to_target(
                 current_price,
                 floor_target,
                 dt,
-                "V6 regime floor restore",
-                decision.detail + self._regime_suffix(),
+                reason,
+                detail,
                 force_floor=True,
             )
             if record:
                 self.local_base_target_pct = record.target_pct
-                self.local_t_cycle = None
-                self.local_t_cycle_base_pct = None
-                self.local_t_entry_price = None
-                self.local_t_entry_shares = 0
+                if not protected_short:
+                    self.local_t_cycle = None
+                    self.local_t_cycle_base_pct = None
+                    self.local_t_entry_price = None
+                    self.local_t_entry_shares = 0
                 self.last_trade_dt = dt
                 self.day_trade_count += 1
             return record
@@ -437,20 +470,34 @@ class CombinedStrategyV6(BaseStrategy):
             return flow_guard_record
 
         active_floor = self._active_regime_floor_pct()
+        current_pct = self.current_position_pct(current_price)
+        floor_refill_target, protected_short = self._protected_floor_refill_target(current_pct, active_floor)
         if (
             self.shares > 0
             and not self._main_flow_guard_active_today()
-            and self.current_position_pct(current_price) < active_floor - 0.005
+            and floor_refill_target is not None
+            and current_pct < floor_refill_target - 0.005
         ):
-            record = self._align_to_target(
+            reason = "V6 local short hard-floor refill" if protected_short else "V6 floor refill"
+            detail = self._detail(factors, "floor", 1.0)
+            if protected_short:
+                detail = (
+                    detail
+                    + f" short_refill_lock=1 active_floor={active_floor*100:.1f}%"
+                    + f" hard_floor={floor_refill_target*100:.1f}%"
+                )
+            align_to_target = super()._align_to_target if protected_short else self._align_to_target
+            record = align_to_target(
                 current_price,
-                active_floor,
+                floor_refill_target,
                 dt,
-                "V6 floor refill",
-                self._detail(factors, "floor", 1.0),
+                reason,
+                detail,
                 force_floor=True,
             )
             if record:
+                self.last_trade_dt = dt
+                self.day_trade_count += 1
                 return record
 
         # Regime guardrail: rebalance if position is significantly outside band

@@ -50,7 +50,7 @@ STANDARD_COLUMNS = [
     "cum_amount",
     "tick_vol",
     "tick_amt",
-] + ORDERBOOK_COLS + ["signal", "is_realtime", "source_file"]
+] + ORDERBOOK_COLS + ["signal", "is_realtime", "is_tick_history", "source_file"]
 
 
 @dataclass(frozen=True)
@@ -100,10 +100,12 @@ def _load_one_file(path: Path, warnings: list[str]) -> pd.DataFrame:
         raise ValueError(f"{path.name}: missing server_time column")
 
     realtime = "local_time_ms" in original_columns and ("bp1" in original_columns or "sp1" in original_columns)
+    tick_history = not realtime and len(df) > 1000
     df["date"] = date_str
     df["server_time"] = df["server_time"].astype(str).str.strip()
     df["dt"] = pd.to_datetime(df["date"] + " " + df["server_time"], errors="coerce")
     df["is_realtime"] = bool(realtime)
+    df["is_tick_history"] = bool(tick_history)
     df["source_file"] = path.name
     if "signal" not in df.columns:
         df["signal"] = "HOLD"
@@ -196,6 +198,7 @@ def row_to_tick(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
         "tick_vol": float(row.get("tick_vol", 0.0) or 0.0),
         "tick_amt": float(row.get("tick_amt", 0.0) or 0.0),
         "_is_realtime": bool(row.get("is_realtime", False)),
+        "_is_tick_history": bool(row.get("is_tick_history", False)),
     }
     for column in ORDERBOOK_COLS:
         tick[column] = float(row.get(column, 0.0) or 0.0)

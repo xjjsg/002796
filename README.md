@@ -31,6 +31,7 @@ The project has been modularized into the `sz002796` package for better maintain
 | `sz002796/state_store.py` | Realtime trade state serialization, persistence, and reconciliation logic. |
 | `sz002796/tick_writer.py` | Writes realtime ticks into daily CSV files. |
 | `sz002796/fetcher.py` | Realtime asynchronous data fetching from Tencent API. |
+| `sz002796/realtime_sources.py` | GUI market-source adapters for the existing Tencent API and QMT realtime ticks. |
 | `sz002796/gui.py` | Graphical User Interface elements built with `customtkinter`. |
 | `sz002796/backtest.py` | Backtest runner logic. |
 
@@ -71,6 +72,24 @@ Start the GUI:
 
 ```powershell
 python run_gui.py
+```
+
+The GUI header lets you choose the realtime market-data source before startup:
+
+- `现有接口`: the existing Tencent quote API path.
+- `QMT`: miniQMT realtime tick subscription through `qmt.live_data`; it is data-only and does not call QMT order APIs.
+
+When `QMT` is selected, startup errors, runtime feed errors, callback errors, or
+30 seconds without a valid trading-time tick automatically fall back to `现有接口`
+for the rest of that GUI run. The GUI log records the fallback event and the
+header shows the active source. The dashboard is organized around the current
+V6 strategy: account/position, regime band, local-T cycle, rolling tick chart,
+core factor changes, V6 score stack, and orderbook depth.
+
+You can also set the default selection before launching:
+
+```powershell
+$env:GUI_MARKET_SOURCE="qmt"; python run_gui.py
 ```
 
 ## Backtest
