@@ -12,6 +12,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from sz002796.strategy_v6 import CombinedStrategyV6
 from sz002796.config import INITIAL_CAPITAL
 from sz002796.position import PositionMode, TradeRecord
@@ -39,7 +41,17 @@ from sz002796.backtest import (
     is_limit_blocked,
     run_backtest,
 )
-from sz002796.factors import IntradayFactorCalc
+from sz002796.factors import FactorSnapshot, IntradayFactorCalc
+from qmt.anti_overfit_validation import (
+    LEGACY_COMPARE_VARIANTS,
+    LEGACY_COMPARE_WINDOWS,
+    MODULE_REASON_MAP,
+    RunResult,
+    VARIANTS,
+    ValidationFold,
+    build_parser,
+    floor_refill_conflicts,
+)
 
 
 def make_tick(dt: datetime, price: float, idx: int) -> dict:
@@ -69,6 +81,33 @@ def fixed_regime_decision(floor_pct: float = 0.40) -> MarketRegimeDecision:
         detail="test",
         allow_cross_day=True,
         allow_local_t=True,
+    )
+
+
+def directional_regime_decision(regime: MarketRegime, floor_pct: float = 0.40) -> MarketRegimeDecision:
+    if regime == MarketRegime.DOWNTREND:
+        ceiling_pct = 0.60
+        allow_cross_day = False
+        allow_local_t = False
+    elif regime == MarketRegime.UPTREND:
+        ceiling_pct = 1.00
+        allow_cross_day = False
+        allow_local_t = False
+        floor_pct = max(floor_pct, 0.95)
+    else:
+        ceiling_pct = 1.00
+        allow_cross_day = True
+        allow_local_t = True
+    return MarketRegimeDecision(
+        regime=regime,
+        tags=("test",),
+        confidence=0.8,
+        target_floor_pct=floor_pct,
+        target_ceiling_pct=ceiling_pct,
+        regime_score=0.0,
+        detail="test",
+        allow_cross_day=allow_cross_day,
+        allow_local_t=allow_local_t,
     )
 
 
@@ -348,6 +387,92 @@ class SmokeTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertAlmostEqual(snapshot.consecutive_above_vwap, 3.0, places=6)
         self.assertAlmostEqual(snapshot.consecutive_below_vwap, 0.0, places=6)
+
+    def test_intraday_range_ignores_external_high_low_fields(self):
+        calc = IntradayFactorCalc(local_window=30)
+        start = datetime(2026, 6, 1, 9, 30)
+        first = make_tick(start, 10.0, 0)
+        first["high"] = 99.0
+        first["low"] = 1.0
+        calc.update(first, True)
+
+        second = make_tick(start + timedelta(minutes=1), 11.0, 1)
+        second["high"] = 99.0
+        second["low"] = 1.0
+        snapshot = calc.update(second, False)
+
+        self.assertAlmostEqual(snapshot.intraday_high, 11.0)
+        self.assertAlmostEqual(snapshot.intraday_low, 10.0)
+        self.assertAlmostEqual(snapshot.high_return, 0.10)
+        self.assertAlmostEqual(snapshot.range_position, 1.0)
+
+    def test_validation_attribution_knows_directional_local_t_reasons(self):
+        self.assertEqual(MODULE_REASON_MAP["V6 local short entry"][0], "4_intraday_t")
+        self.assertEqual(MODULE_REASON_MAP["V6 local short cover"][0], "4_intraday_t")
+        self.assertEqual(MODULE_REASON_MAP["V6 local long entry"][0], "4_intraday_t")
+        self.assertEqual(MODULE_REASON_MAP["V6 local long exit"][0], "4_intraday_t")
+
+    def test_anti_overfit_variants_compare_current_to_legacy_t(self):
+        self.assertIn("baseline", VARIANTS)
+        self.assertIn("no_local_t", VARIANTS)
+        self.assertEqual(VARIANTS["legacy_local_t"]["trend_local_t_mode"], "legacy")
+        self.assertTrue(VARIANTS["legacy_refill_lock"]["protect_local_short_floor_refill"])
+        self.assertNotIn("candidate_short_refill_lock", VARIANTS)
+        default_variants = build_parser().get_default("variants")
+        self.assertIn("legacy_local_t", default_variants)
+        self.assertIn("legacy_refill_lock", default_variants)
+        self.assertNotIn("candidate_short_refill_lock", default_variants)
+
+    def test_legacy_compare_cli_is_lightweight_directional_vs_legacy(self):
+        self.assertEqual(set(LEGACY_COMPARE_VARIANTS), {"baseline_directional", "legacy_local_t"})
+        self.assertEqual(LEGACY_COMPARE_VARIANTS["legacy_local_t"]["trend_local_t_mode"], "legacy")
+        self.assertIn("recent_fixed", LEGACY_COMPARE_WINDOWS)
+        self.assertIn("rolling_latest_15", LEGACY_COMPARE_WINDOWS)
+        args = build_parser().parse_args(["--legacy-compare-only"])
+        self.assertTrue(args.legacy_compare_only)
+
+    def test_floor_refill_conflicts_counts_directional_short_entry(self):
+        fold = ValidationFold("unit", "2026-06-01", "2026-06-01", "2026-06-01", "2026-06-01")
+        result = RunResult(
+            fold=fold,
+            variant="unit",
+            params={},
+            slippage_ticks=1,
+            equity=pd.DataFrame(),
+            trades=pd.DataFrame(
+                [
+                    {
+                        "time": "2026-06-01 10:00:00",
+                        "date": "2026-06-01",
+                        "reason": "V6 local short entry",
+                        "amount": 1000.0,
+                    },
+                    {
+                        "time": "2026-06-01 10:01:00",
+                        "date": "2026-06-01",
+                        "reason": "V6 floor refill",
+                        "amount": 900.0,
+                    },
+                    {
+                        "time": "2026-06-01 10:02:00",
+                        "date": "2026-06-01",
+                        "reason": "V6 local short cover",
+                        "amount": 950.0,
+                    },
+                ]
+            ),
+            orderbook_fallback_count=0,
+            limit_skip_count=0,
+        )
+
+        conflicts = floor_refill_conflicts(result)
+
+        self.assertEqual(len(conflicts), 1)
+        row = conflicts.iloc[0]
+        self.assertEqual(int(row["local_short_entry_count"]), 1)
+        self.assertEqual(int(row["open_short_then_floor_refill_count"]), 1)
+        self.assertEqual(int(row["trim_then_floor_refill_count"]), 1)
+        self.assertAlmostEqual(float(row["trim_then_floor_refill_amount"]), 900.0)
 
     def test_strategy_state_round_trip(self):
         tmp = Path(tempfile.mkdtemp())
@@ -832,8 +957,8 @@ class SmokeTests(unittest.TestCase):
         self.assertIsNone(record)
         self.assertEqual(calls, [])
 
-    def test_local_short_refill_lock_is_disabled_by_default(self):
-        strategy = CombinedStrategyV6()
+    def test_local_short_refill_lock_can_be_disabled_in_legacy_mode(self):
+        strategy = CombinedStrategyV6(trend_local_t_mode="legacy")
         strategy.current_date = "2026-06-01"
         strategy.cash = 8000.0
         strategy.shares = 300
@@ -856,6 +981,31 @@ class SmokeTests(unittest.TestCase):
         self.assertIsNone(record)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][3], "V6 floor refill")
+
+    def test_directional_local_short_refill_lock_is_enabled_by_default(self):
+        strategy = CombinedStrategyV6()
+        strategy.current_date = "2026-06-01"
+        strategy.cash = 8000.0
+        strategy.shares = 300
+        strategy.target_pct = 0.30
+        strategy.local_base_target_pct = 0.70
+        strategy.local_t_cycle = "short"
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 45)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        calls = []
+
+        def fail_if_align_called(*args, **kwargs):
+            calls.append((args, kwargs))
+            return None
+
+        strategy._align_to_target = fail_if_align_called
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 10.0, 1))
+
+        self.assertIsNone(record)
+        self.assertEqual(calls, [])
+        self.assertEqual(strategy.local_t_cycle, "short")
 
     def test_local_short_refill_lock_skips_refill_above_hard_floor(self):
         strategy = CombinedStrategyV6(protect_local_short_floor_refill=True)
@@ -904,6 +1054,184 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(strategy.local_t_cycle, "short")
         self.assertEqual(strategy.day_trade_count, 1)
         self.assertEqual(strategy.last_trade_dt, datetime(2026, 6, 1, 13, 0))
+
+    def test_directional_local_t_permissions_follow_regime(self):
+        strategy = CombinedStrategyV6()
+
+        strategy.regime_decision = directional_regime_decision(MarketRegime.DOWNTREND, floor_pct=0.0)
+        self.assertEqual(strategy._local_t_permissions(), (True, True, False, True))
+
+        strategy.regime_decision = directional_regime_decision(MarketRegime.UPTREND)
+        self.assertEqual(strategy._local_t_permissions(), (False, True, True, True))
+
+        strategy.regime_decision = directional_regime_decision(MarketRegime.RANGE)
+        self.assertEqual(strategy._local_t_permissions(), (True, True, True, True))
+
+    def test_downtrend_allows_short_entry_but_blocks_long_entry(self):
+        strategy = CombinedStrategyV6(local_short_min_day_return=0.0)
+        strategy.cash = 100000.0
+        strategy.shares = 10000
+        strategy.target_pct = 0.50
+        strategy.local_base_target_pct = 0.50
+        strategy.market_regime.update = lambda tick: directional_regime_decision(MarketRegime.DOWNTREND, floor_pct=0.0)
+        strategy._score_cross_sell = lambda factors: 0.0
+        strategy._score_cross_buy = lambda factors: 0.0
+        strategy._score_local_trim = lambda factors: 1.0
+        strategy._score_local_cover = lambda factors: 1.0
+        strategy._score_sell_timing = lambda factors: 1.0
+        strategy._score_buy_timing = lambda factors: 1.0
+
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 10, 0), 10.0, 100))
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.reason, "V6 local short entry")
+        self.assertEqual(record.side, "SELL")
+        self.assertEqual(strategy.local_t_cycle, "short")
+
+        blocked = CombinedStrategyV6()
+        blocked.cash = 100000.0
+        blocked.shares = 1000
+        blocked.target_pct = 0.40
+        blocked.local_base_target_pct = 0.40
+        blocked.market_regime.update = lambda tick: directional_regime_decision(MarketRegime.DOWNTREND, floor_pct=0.0)
+        blocked._score_cross_sell = lambda factors: 0.0
+        blocked._score_cross_buy = lambda factors: 0.0
+        blocked._score_local_trim = lambda factors: 0.0
+        blocked._score_local_cover = lambda factors: 1.0
+        blocked._score_buy_timing = lambda factors: 1.0
+
+        self.assertIsNone(blocked.on_tick(make_tick(datetime(2026, 6, 1, 10, 0), 10.0, 100)))
+        self.assertIsNone(blocked.local_t_cycle)
+
+    def test_local_short_entry_blocks_high_volume_opening_breakout(self):
+        strategy = CombinedStrategyV6()
+        strategy.regime_decision = directional_regime_decision(MarketRegime.RANGE)
+        factors = FactorSnapshot(
+            price=10.0,
+            vwap=9.7,
+            day_vwap_dev=0.03,
+            local_vwap=9.75,
+            local_vwap_dev=0.025,
+            velocity=0.003,
+            acceleration=-0.010,
+            vol_mom=1.50,
+            day_return=0.04,
+            tick_vol=100.0,
+            tick_amt=1000.0,
+            high_return=0.06,
+            opening_range_position=1.20,
+            break_opening_high=1.0,
+        )
+
+        self.assertFalse(strategy._local_short_entry_signal(factors, 0.95))
+
+        factors.vol_mom = 0.80
+        self.assertTrue(strategy._local_short_entry_signal(factors, 0.95))
+
+    def test_local_short_entry_requires_rebound_and_timing(self):
+        strategy = CombinedStrategyV6()
+        strategy.regime_decision = directional_regime_decision(MarketRegime.RANGE)
+        factors = FactorSnapshot(
+            price=10.0,
+            vwap=9.7,
+            day_vwap_dev=0.03,
+            local_vwap=9.75,
+            local_vwap_dev=0.025,
+            velocity=0.003,
+            acceleration=-0.010,
+            vol_mom=0.80,
+            day_return=0.005,
+            tick_vol=100.0,
+            tick_amt=1000.0,
+            high_return=0.06,
+        )
+
+        self.assertFalse(strategy._local_short_entry_signal(factors, 0.95))
+
+        factors.day_return = 0.04
+        self.assertTrue(strategy._local_short_entry_signal(factors, 0.95))
+
+        factors.day_vwap_dev = 0.010
+        factors.local_vwap_dev = 0.004
+        factors.high_return = 0.018
+        factors.acceleration = 0.001
+        self.assertFalse(strategy._local_short_entry_signal(factors, 0.95))
+
+    def test_uptrend_blocks_short_entry_but_allows_long_entry(self):
+        blocked = CombinedStrategyV6()
+        blocked.cash = 1000.0
+        blocked.shares = 10000
+        blocked.target_pct = 0.95
+        blocked.local_base_target_pct = 0.95
+        blocked.market_regime.update = lambda tick: directional_regime_decision(MarketRegime.UPTREND)
+        blocked._score_cross_sell = lambda factors: 0.0
+        blocked._score_cross_buy = lambda factors: 0.0
+        blocked._score_local_trim = lambda factors: 1.0
+        blocked._score_sell_timing = lambda factors: 1.0
+
+        self.assertIsNone(blocked.on_tick(make_tick(datetime(2026, 6, 1, 10, 0), 10.0, 100)))
+        self.assertIsNone(blocked.local_t_cycle)
+
+        strategy = CombinedStrategyV6()
+        strategy.cash = 5500.0
+        strategy.shares = 10000
+        strategy.target_pct = 0.95
+        strategy.local_base_target_pct = 0.95
+        strategy.market_regime.update = lambda tick: directional_regime_decision(MarketRegime.UPTREND)
+        strategy._score_cross_sell = lambda factors: 0.0
+        strategy._score_cross_buy = lambda factors: 0.0
+        strategy._score_local_trim = lambda factors: 0.0
+        strategy._score_local_cover = lambda factors: 1.0
+        strategy._score_buy_timing = lambda factors: 1.0
+
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 10, 0), 10.0, 100))
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.reason, "V6 local long entry")
+        self.assertEqual(record.side, "BUY")
+        self.assertEqual(strategy.local_t_cycle, "long")
+
+    def test_local_short_cycle_profit_cover_precedes_floor_refill(self):
+        strategy = CombinedStrategyV6()
+        strategy.cash = 100000.0
+        strategy.shares = 1000
+        strategy.target_pct = 0.30
+        strategy.local_base_target_pct = 0.40
+        strategy.local_t_cycle = "short"
+        strategy.local_t_entry_price = 10.0
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 59)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 9.70, 100))
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.reason, "V6 local short cover")
+        self.assertEqual(record.side, "BUY")
+        self.assertEqual(record.shares, 300)
+        self.assertIsNone(strategy.local_t_cycle)
+        self.assertIn("exit=profit", record.detail)
+
+    def test_local_long_cycle_stop_exit_precedes_cooldown(self):
+        strategy = CombinedStrategyV6()
+        strategy.cash = 100000.0
+        strategy.shares = 1000
+        strategy.target_pct = 0.50
+        strategy.local_base_target_pct = 0.40
+        strategy.local_t_cycle = "long"
+        strategy.local_t_entry_price = 10.0
+        strategy.local_t_entry_shares = 300
+        strategy.last_trade_dt = datetime(2026, 6, 1, 12, 59)
+        strategy.market_regime.update = lambda tick: fixed_regime_decision()
+
+        record = strategy.on_tick(make_tick(datetime(2026, 6, 1, 13, 0), 9.79, 100))
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.reason, "V6 local long exit")
+        self.assertEqual(record.side, "SELL")
+        self.assertEqual(record.shares, 300)
+        self.assertIsNone(strategy.local_t_cycle)
+        self.assertIn("exit=stop", record.detail)
 
     def test_v6_backtest_writes_independent_outputs(self):
         tmp = Path(tempfile.mkdtemp())

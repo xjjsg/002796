@@ -51,6 +51,19 @@ class CombinedStrategyV6(BaseStrategy):
         local_buy_first_profit: float = 0.012,
         local_buy_first_stop: float = 0.020,
         local_flat_time: str = "14:40:00",
+        trend_local_t_mode: str = "directional",
+        local_short_profit: float = 0.025,
+        local_short_stop: float = 0.015,
+        local_long_profit: float | None = None,
+        local_long_stop: float | None = None,
+        local_t_flat_time: str | None = None,
+        local_sell_timing_score: float = 0.50,
+        local_buy_timing_score: float = 0.80,
+        local_short_min_day_return: float = 0.015,
+        local_short_breakout_opening_pos: float = 1.05,
+        local_short_breakout_vol_mom: float = 1.10,
+        block_local_short_warmup: bool = True,
+        max_local_t_cycles_per_day: int = 1,
         min_target_move: float = 0.04,
         enable_cross_day: bool = True,
         enable_local_t: bool = True,
@@ -97,7 +110,23 @@ class CombinedStrategyV6(BaseStrategy):
         self.local_trim_step_slope = local_trim_step_slope
         self.local_buy_first_profit = local_buy_first_profit
         self.local_buy_first_stop = local_buy_first_stop
-        self.local_flat_time = local_flat_time
+        self.trend_local_t_mode = trend_local_t_mode
+        self.local_short_profit = local_short_profit
+        self.local_short_stop = local_short_stop
+        self.local_long_profit = local_long_profit if local_long_profit is not None else local_buy_first_profit
+        self.local_long_stop = local_long_stop if local_long_stop is not None else local_buy_first_stop
+        self.local_t_flat_time = local_t_flat_time or (
+            "14:35:00" if trend_local_t_mode == "directional" else local_flat_time
+        )
+        self.local_flat_time = self.local_t_flat_time
+        self.local_sell_timing_score = local_sell_timing_score
+        self.local_buy_timing_score = local_buy_timing_score
+        self.local_short_min_day_return = local_short_min_day_return
+        self.local_short_breakout_opening_pos = local_short_breakout_opening_pos
+        self.local_short_breakout_vol_mom = local_short_breakout_vol_mom
+        self.block_local_short_warmup = block_local_short_warmup
+        self.max_local_t_cycles_per_day = max(0, max_local_t_cycles_per_day)
+        self.local_t_cycles_today = 0
         self.local_base_target_pct: Optional[float] = None
         self.pending_cross_buy: Optional[tuple[float, float]] = None
         self.local_t_cycle: Optional[str] = None
@@ -134,8 +163,12 @@ class CombinedStrategyV6(BaseStrategy):
         current_pct: float,
         active_floor: float,
     ) -> tuple[Optional[float], bool]:
-        if not (
+        protect_short_cycle = (
             self.protect_local_short_floor_refill
+            or self.trend_local_t_mode == "directional"
+        )
+        if not (
+            protect_short_cycle
             and self.local_t_cycle == "short"
             and self.local_t_entry_shares > 0
         ):
@@ -152,6 +185,73 @@ class CombinedStrategyV6(BaseStrategy):
     def _allow_local_t_signals(self) -> bool:
         decision = self.regime_decision
         return self.enable_local_t and (decision is None or decision.allow_local_t)
+
+    def _local_t_permissions(self) -> tuple[bool, bool, bool, bool]:
+        """Return short_entry, short_cover, long_entry, long_exit permissions."""
+        if not self.enable_local_t:
+            return False, False, False, False
+        decision = self.regime_decision
+        if self.trend_local_t_mode != "directional":
+            allowed = decision is None or decision.allow_local_t
+            return allowed, allowed, allowed, allowed
+        if decision is None or decision.allow_local_t:
+            return True, True, True, True
+        if decision.regime == MarketRegime.DOWNTREND:
+            return True, True, False, True
+        if decision.regime == MarketRegime.UPTREND:
+            return False, True, True, True
+        return True, True, True, True
+
+    def _clear_local_cycle(self) -> None:
+        self.local_t_cycle = None
+        self.local_t_cycle_base_pct = None
+        self.local_t_entry_price = None
+        self.local_t_entry_shares = 0
+
+    def _local_cycle_entry_return(self, current_price: float) -> float:
+        if self.local_t_entry_price and self.local_t_entry_price > 0:
+            return current_price / self.local_t_entry_price - 1.0
+        return 0.0
+
+    def _local_short_entry_signal(self, factors: FactorSnapshot, score: float) -> bool:
+        if score < self.local_enter_score:
+            return False
+        if (
+            self.block_local_short_warmup
+            and self.regime_decision is not None
+            and "warmup" in self.regime_decision.tags
+        ):
+            return False
+        if factors.day_return < self.local_short_min_day_return:
+            return False
+        if self._score_sell_timing(factors) < self.local_sell_timing_score:
+            return False
+        high_volume_opening_breakout = (
+            factors.break_opening_high > 0
+            and factors.opening_range_position > self.local_short_breakout_opening_pos
+            and factors.vol_mom >= self.local_short_breakout_vol_mom
+        )
+        return not high_volume_opening_breakout
+
+    def _local_long_entry_signal(self, factors: FactorSnapshot, score: float) -> bool:
+        if score < self.local_enter_score:
+            return False
+        return self._score_buy_timing(factors) >= self.local_buy_timing_score
+
+    def _cross_buy_entry_signal(self, factors: FactorSnapshot, score: float) -> bool:
+        if score < self.cross_enter_score:
+            return False
+        if self.trend_local_t_mode != "directional":
+            return True
+        sharp_intraday_drop = factors.day_return <= -0.035 or factors.day_vwap_dev <= -0.035
+        if sharp_intraday_drop:
+            return self._score_buy_timing(factors) >= self.local_buy_timing_score
+        return True
+
+    def _can_open_local_cycle(self) -> bool:
+        if self.max_local_t_cycles_per_day <= 0:
+            return False
+        return self.local_t_cycle is None and self.local_t_cycles_today < self.max_local_t_cycles_per_day
 
     def _score_main_flow_distribution(self, f: FactorSnapshot) -> float:
         drop = clamp((-f.day_return - 0.025) / 0.060)
@@ -432,6 +532,7 @@ class CombinedStrategyV6(BaseStrategy):
             return False
         self.current_date = date_str
         self.day_trade_count = 0
+        self.local_t_cycles_today = 0
         self._base_for_local_t()
         self.pending_cross_buy = None
         self.main_flow_guard_floor_pct = None
@@ -456,18 +557,76 @@ class CombinedStrategyV6(BaseStrategy):
         factors = self.factor_calc.update(tick, is_new_day)
         self.regime_decision = self.market_regime.update(tick) if self.enable_market_regime else None
         allow_cross_day = self._allow_cross_day_signals()
-        allow_local_t = self._allow_local_t_signals()
+        allow_short_entry, allow_short_cover, allow_long_entry, allow_long_exit = self._local_t_permissions()
+        allow_local_t = allow_short_entry or allow_short_cover or allow_long_entry or allow_long_exit
         if not allow_cross_day:
             self.pending_cross_buy = None
-        if not allow_local_t:
-            self.local_t_cycle = None
-            self.local_t_cycle_base_pct = None
-            self.local_t_entry_price = None
-            self.local_t_entry_shares = 0
+        if not self.enable_local_t:
+            self._clear_local_cycle()
 
         flow_guard_record = self._main_flow_guard_rebalance(factors, current_price, dt, time_str)
         if flow_guard_record:
             return flow_guard_record
+
+        if self.local_t_cycle == "short" and self.local_t_entry_price is not None and allow_short_cover:
+            entry_ret = self._local_cycle_entry_return(current_price)
+            cover_score = self._score_local_cover(factors)
+            exit_tag: Optional[str] = None
+            exit_score = cover_score
+            if entry_ret <= -self.local_short_profit:
+                exit_tag = "profit"
+                exit_score = max(exit_score, 1.0)
+            elif entry_ret >= self.local_short_stop:
+                exit_tag = "stop"
+                exit_score = max(exit_score, 1.0)
+            elif cover_score >= self.local_enter_score:
+                exit_tag = "signal"
+            elif time_str >= self.local_t_flat_time:
+                exit_tag = "time"
+                exit_score = max(exit_score, 1.0)
+            if exit_tag is not None:
+                record = self._close_local_cycle_to_base(
+                    current_price,
+                    dt,
+                    "V6 local short cover",
+                    self._local_cycle_detail(factors, "short_cover", exit_score, current_price)
+                    + f" exit={exit_tag}",
+                )
+                if record:
+                    self._clear_local_cycle()
+                    self.last_trade_dt = dt
+                    self.day_trade_count += 1
+                    return record
+
+        if self.local_t_cycle == "long" and self.local_t_entry_price is not None and allow_long_exit:
+            entry_ret = self._local_cycle_entry_return(current_price)
+            trim_score = self._score_local_trim(factors)
+            exit_tag: Optional[str] = None
+            exit_score = trim_score
+            if entry_ret >= self.local_long_profit:
+                exit_tag = "profit"
+                exit_score = max(exit_score, 1.0)
+            elif entry_ret <= -self.local_long_stop:
+                exit_tag = "stop"
+                exit_score = max(exit_score, 1.0)
+            elif trim_score >= self.local_enter_score:
+                exit_tag = "signal"
+            elif time_str >= self.local_t_flat_time:
+                exit_tag = "time"
+                exit_score = max(exit_score, 1.0)
+            if exit_tag is not None:
+                record = self._close_local_cycle_to_base(
+                    current_price,
+                    dt,
+                    "V6 local long exit",
+                    self._local_cycle_detail(factors, "long_exit", exit_score, current_price)
+                    + f" exit={exit_tag}",
+                )
+                if record:
+                    self._clear_local_cycle()
+                    self.last_trade_dt = dt
+                    self.day_trade_count += 1
+                    return record
 
         active_floor = self._active_regime_floor_pct()
         current_pct = self.current_position_pct(current_price)
@@ -511,13 +670,29 @@ class CombinedStrategyV6(BaseStrategy):
         # V6 signals: no multipliers, regime only constrains the final target
         cross_sell = self._score_cross_sell(factors) if allow_cross_day else 0.0
         cross_buy = self._score_cross_buy(factors) if allow_cross_day else 0.0
-        local_trim = self._score_local_trim(factors) if allow_local_t else 0.0
-        local_cover = self._score_local_cover(factors) if allow_local_t else 0.0
+        raw_local_trim = self._score_local_trim(factors) if (allow_short_entry or allow_long_exit) else 0.0
+        raw_local_cover = self._score_local_cover(factors) if (allow_short_cover or allow_long_entry) else 0.0
+        local_trim = raw_local_trim if (
+            (self.local_t_cycle == "long" and allow_long_exit)
+            or (
+                allow_short_entry
+                and self._can_open_local_cycle()
+                and self._local_short_entry_signal(factors, raw_local_trim)
+            )
+        ) else 0.0
+        local_cover = raw_local_cover if (
+            (self.local_t_cycle == "short" and allow_short_cover)
+            or (
+                allow_long_entry
+                and self._can_open_local_cycle()
+                and self._local_long_entry_signal(factors, raw_local_cover)
+            )
+        ) else 0.0
 
         record: Optional[TradeRecord] = None
         next_local_cycle: Optional[str] = self.local_t_cycle
         next_local_entry_price: Optional[float] = self.local_t_entry_price
-        if cross_buy >= self.cross_enter_score and cross_buy >= cross_sell:
+        if self._cross_buy_entry_signal(factors, cross_buy) and cross_buy >= cross_sell and self.local_t_cycle != "short":
             target = self._cross_target("buy", cross_buy)
             if target > self.target_pct + self.min_target_move:
                 self.pending_cross_buy = (cross_buy, target)
@@ -532,7 +707,7 @@ class CombinedStrategyV6(BaseStrategy):
                     "V6 cross-day reduce",
                     self._cross_detail(factors, "sell", cross_sell, target),
                 )
-        elif self.pending_cross_buy is not None and time_str >= self.cross_buy_execute_time:
+        elif self.pending_cross_buy is not None and time_str >= self.cross_buy_execute_time and self.local_t_cycle != "short":
             pending_score, pending_target = self.pending_cross_buy
             if pending_target > self.target_pct + self.min_target_move:
                 record = self._align_to_target(
@@ -544,45 +719,22 @@ class CombinedStrategyV6(BaseStrategy):
                 )
                 if record:
                     self.pending_cross_buy = None
-        elif (
-            allow_local_t
-            and self.local_t_cycle == "long"
-            and self.local_t_entry_price is not None
-            and self.target_pct > self._base_for_local_t() + self.min_target_move
-            and (
-                current_price / self.local_t_entry_price - 1.0 >= self.local_buy_first_profit
-                or current_price / self.local_t_entry_price - 1.0 <= -self.local_buy_first_stop
-                or time_str >= self.local_flat_time
-            )
-        ):
-            entry_ret = current_price / self.local_t_entry_price - 1.0
-            reason = "V6 local long profit exit"
-            if entry_ret <= -self.local_buy_first_stop:
-                reason = "V6 local long stop exit"
-            elif time_str >= self.local_flat_time:
-                reason = "V6 local long time exit"
-            record = self._close_local_cycle_to_base(
-                current_price,
-                dt,
-                reason,
-                self._local_cycle_detail(factors, "long_exit", 1.0, current_price),
-            )
-            if record:
-                next_local_cycle = None
-                next_local_entry_price = None
         elif local_trim >= self.local_enter_score:
             base = self._base_for_local_t()
             if self.local_t_cycle == "long" and self.target_pct > base + self.min_target_move:
-                reason = "V6 local long trim exit"
-                detail = self._local_cycle_detail(factors, "long_trim", local_trim, current_price)
+                reason = "V6 local long exit"
+                detail = self._local_cycle_detail(factors, "long_exit", local_trim, current_price) + " exit=signal"
                 record = self._close_local_cycle_to_base(current_price, dt, reason, detail)
                 if record:
                     next_local_cycle = None
                     next_local_entry_price = None
             else:
                 target = self._target_for_local_t("trim", local_trim)
-                reason = "V6 local trim"
-                detail = self._detail(factors, "trim", local_trim)
+                reason = "V6 local short entry"
+                detail = (
+                    self._detail(factors, "short_entry", local_trim)
+                    + f" timing={self._score_sell_timing(factors):.2f}"
+                )
                 if target < base - self.min_target_move:
                     next_local_cycle = "short"
                     next_local_entry_price = current_price
@@ -596,41 +748,49 @@ class CombinedStrategyV6(BaseStrategy):
         elif local_cover >= self.local_enter_score:
             base = self._base_for_local_t()
             raw_target = self._target_for_local_t("cover", local_cover)
-            if self.target_pct < base - self.min_target_move:
+            if self.target_pct < base - self.min_target_move and allow_short_cover:
                 target = min(raw_target, base)
                 reason = "V6 local short cover"
-                detail = self._local_cycle_detail(factors, "short_cover", local_cover, current_price)
+                detail = self._local_cycle_detail(factors, "short_cover", local_cover, current_price) + " exit=signal"
                 if target >= base - self.min_target_move:
                     next_local_cycle = None
                     next_local_entry_price = None
-            else:
+            elif allow_long_entry and self._can_open_local_cycle():
                 target = raw_target
                 reason = "V6 local long entry"
-                detail = self._detail(factors, "long_entry", local_cover)
+                detail = (
+                    self._detail(factors, "long_entry", local_cover)
+                    + f" timing={self._score_buy_timing(factors):.2f}"
+                )
                 if target > base + self.min_target_move:
                     next_local_cycle = "long"
                     next_local_entry_price = current_price
-            record = self._align_to_target(
-                current_price,
-                target,
-                dt,
-                reason,
-                detail,
-            )
+            else:
+                target = self.target_pct
+                reason = ""
+                detail = ""
+            if reason:
+                record = self._align_to_target(
+                    current_price,
+                    target,
+                    dt,
+                    reason,
+                    detail,
+                )
 
         if record:
             if "cross-day" in record.reason or "regime floor restore" in record.reason:
                 self.local_base_target_pct = record.target_pct
-                self.local_t_cycle = None
-                self.local_t_cycle_base_pct = None
-                self.local_t_entry_price = None
-                self.local_t_entry_shares = 0
+                self._clear_local_cycle()
+            elif record.reason in {"V6 local short cover", "V6 local long exit"}:
+                self._clear_local_cycle()
             else:
                 self.local_t_cycle = next_local_cycle
                 self.local_t_cycle_base_pct = self._base_for_local_t() if next_local_cycle else None
                 self.local_t_entry_price = next_local_entry_price
-                if next_local_cycle and record.reason in {"V6 local trim", "V6 local long entry"}:
+                if next_local_cycle and record.reason in {"V6 local short entry", "V6 local long entry"}:
                     self.local_t_entry_shares = record.shares
+                    self.local_t_cycles_today += 1
                 elif next_local_cycle is None:
                     self.local_t_entry_shares = 0
             self.last_trade_dt = dt

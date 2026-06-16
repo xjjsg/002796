@@ -68,8 +68,26 @@ DEFAULT_FOLDS: dict[str, ValidationFold] = {
 VARIANTS: dict[str, dict[str, Any]] = {
     "baseline": {},
     "no_local_t": {"enable_local_t": False},
+    "legacy_local_t": {"trend_local_t_mode": "legacy"},
+    "legacy_refill_lock": {
+        "trend_local_t_mode": "legacy",
+        "protect_local_short_floor_refill": True,
+    },
     "cooldown_60": {"cooldown_minutes": 60},
-    "candidate_short_refill_lock": {"protect_local_short_floor_refill": True},
+}
+
+LEGACY_COMPARE_VARIANTS: dict[str, dict[str, Any]] = {
+    "baseline_directional": {},
+    "legacy_local_t": VARIANTS["legacy_local_t"],
+}
+
+LEGACY_COMPARE_WINDOWS: dict[str, tuple[str | None, str | None]] = {
+    "full_to_2026_06_15": (None, "2026-06-15"),
+    "full_to_latest": (None, None),
+    "may_validation": ("2026-05-01", "2026-05-31"),
+    "jun_validation": ("2026-06-01", "2026-06-30"),
+    "recent_fixed": ("2026-05-26", "2026-06-15"),
+    "rolling_latest_15": ("ROLLING_15", None),
 }
 
 PRODUCTION_SCAN_FILES = [
@@ -101,8 +119,10 @@ MODULE_REASON_MAP: dict[str, tuple[str, str]] = {
     "V6 cross-day add": ("3_cross_day_rebalance", "cross_day_rebalance"),
     "V6 cross-day reduce": ("3_cross_day_rebalance", "cross_day_rebalance"),
     "V6 local trim": ("4_intraday_t", "intraday_t"),
+    "V6 local short entry": ("4_intraday_t", "intraday_t"),
     "V6 local short cover": ("4_intraday_t", "intraday_t"),
     "V6 local long entry": ("4_intraday_t", "intraday_t"),
+    "V6 local long exit": ("4_intraday_t", "intraday_t"),
     "V6 local long profit exit": ("4_intraday_t", "intraday_t"),
     "V6 local long stop exit": ("4_intraday_t", "intraday_t"),
     "V6 local long time exit": ("4_intraday_t", "intraday_t"),
@@ -223,6 +243,8 @@ def scan_production_for_lookahead(project_root: Path) -> pd.DataFrame:
             rows.append({"file": rel_path, "line": 0, "pattern": "missing_file", "text": ""})
             continue
         for line_no, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if line.strip().startswith("from __future__ import"):
+                continue
             for pattern in FORBIDDEN_LOOKAHEAD_PATTERNS:
                 if pattern.search(line):
                     rows.append(
@@ -490,6 +512,8 @@ def floor_refill_conflicts(result: RunResult) -> pd.DataFrame:
                 "local_trim_count",
                 "local_short_cover_count",
                 "floor_refill_count",
+                "local_short_entry_count",
+                "open_short_then_floor_refill_count",
                 "trim_then_floor_refill_count",
                 "trim_then_floor_refill_amount",
             ]
@@ -498,6 +522,7 @@ def floor_refill_conflicts(result: RunResult) -> pd.DataFrame:
     for date, day in trades.sort_values("time").groupby("date", sort=True):
         trim_seen = False
         trim_count = 0
+        short_entry_count = 0
         cover_count = 0
         refill_count = 0
         refill_after_trim = 0
@@ -507,6 +532,9 @@ def floor_refill_conflicts(result: RunResult) -> pd.DataFrame:
             if reason == "V6 local trim":
                 trim_seen = True
                 trim_count += 1
+            elif reason == "V6 local short entry":
+                trim_seen = True
+                short_entry_count += 1
             elif reason == "V6 local short cover":
                 cover_count += 1
                 trim_seen = False
@@ -525,6 +553,8 @@ def floor_refill_conflicts(result: RunResult) -> pd.DataFrame:
                     "local_trim_count": trim_count,
                     "local_short_cover_count": cover_count,
                     "floor_refill_count": refill_count,
+                    "local_short_entry_count": short_entry_count,
+                    "open_short_then_floor_refill_count": refill_after_trim,
                     "trim_then_floor_refill_count": refill_after_trim,
                     "trim_then_floor_refill_amount": round(refill_after_trim_amount, 4),
                 }
@@ -956,18 +986,156 @@ def run_validation(args: argparse.Namespace) -> dict[str, str]:
     )
 
 
+def _run_curve_for_params(
+    df: pd.DataFrame,
+    params: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    strategy = V6BacktestExecutionStrategy(initial_capital=INITIAL_CAPITAL, **params)
+    first_row = df.iloc[0]
+    first_price = float(first_row["price"])
+    seed_initial_position(strategy, first_row, INITIAL_STRATEGY_TARGET_PCT)
+    benchmark = benchmark_buy_and_hold(INITIAL_CAPITAL, first_price, first_price, BENCHMARK_TARGET_PCT)
+
+    equity_rows: list[dict[str, Any]] = []
+    for row in df.itertuples(index=False):
+        tick = _tick_from_tuple(row)
+        price = float(row.price)
+        strategy.on_tick(tick)
+        equity_rows.append(
+            {
+                "date": str(row.date),
+                "dt": _timestamp_text(row.dt),
+                "asset": float(strategy.total_asset(price)),
+                "benchmark_asset": float(benchmark.cash_after_buy + benchmark.buy_shares * price),
+            }
+        )
+
+    trades = _normalise_trade_frame(pd.DataFrame(strategy.execution_records))
+    trades["date"] = trades["time"].astype(str).str.slice(0, 10)
+    return pd.DataFrame(equity_rows), trades
+
+
+def _legacy_compare_metric(
+    equity: pd.DataFrame,
+    trades: pd.DataFrame,
+    start: str | None,
+    end: str,
+) -> dict[str, Any]:
+    if start is None:
+        window = equity.loc[equity["date"] <= end].copy()
+        if window.empty:
+            raise ValueError(f"empty legacy compare window start={start} end={end}")
+        start_asset = INITIAL_CAPITAL
+        start_benchmark = float(window.iloc[0]["benchmark_asset"])
+        trade_window = trades.loc[trades["date"] <= end].copy()
+        actual_start = str(window.iloc[0]["date"])
+    else:
+        window = equity.loc[(equity["date"] >= start) & (equity["date"] <= end)].copy()
+        if window.empty:
+            raise ValueError(f"empty legacy compare window start={start} end={end}")
+        start_asset = float(window.iloc[0]["asset"])
+        start_benchmark = float(window.iloc[0]["benchmark_asset"])
+        trade_window = trades.loc[(trades["date"] >= start) & (trades["date"] <= end)].copy()
+        actual_start = str(window.iloc[0]["date"])
+    end_asset = float(window.iloc[-1]["asset"])
+    end_benchmark = float(window.iloc[-1]["benchmark_asset"])
+    strategy_return = end_asset / start_asset - 1.0 if start_asset else 0.0
+    benchmark_return = end_benchmark / start_benchmark - 1.0 if start_benchmark else 0.0
+    reason_counts = (
+        trade_window["reason"].value_counts().sort_index().to_dict()
+        if not trade_window.empty and "reason" in trade_window.columns
+        else {}
+    )
+    return {
+        "actual_start": actual_start,
+        "actual_end": str(window.iloc[-1]["date"]),
+        "strategy_return": round(strategy_return, 8),
+        "benchmark_return": round(benchmark_return, 8),
+        "alpha_return": round(strategy_return - benchmark_return, 8),
+        "end_asset": round(end_asset, 4),
+        "max_drawdown": round(max_drawdown(window["asset"].astype(float).tolist()), 8),
+        "trade_count": int(len(trade_window)),
+        "local_trade_count": int(
+            trade_window["reason"].astype(str).str.contains("local", na=False).sum()
+        )
+        if not trade_window.empty and "reason" in trade_window.columns
+        else 0,
+        "reason_counts": reason_counts,
+    }
+
+
+def run_legacy_compare(args: argparse.Namespace) -> dict[str, str]:
+    scan = scan_production_for_lookahead(Path(PROJECT_ROOT))
+    if not scan.empty and not args.allow_production_scan_findings:
+        raise RuntimeError(
+            "production lookahead scan found forbidden tokens; rerun with --allow-production-scan-findings "
+            "only after reviewing false positives"
+        )
+    bundle = load_market_data(start_date=START_DATE, data_dir=args.data_dir)
+    df = bundle.frame.copy()
+    df["date"] = df["date"].astype(str)
+    latest = str(df.iloc[-1]["date"])
+    unique_dates = list(df["date"].drop_duplicates())
+    rolling_start = unique_dates[-15] if len(unique_dates) >= 15 else unique_dates[0]
+
+    runs = {
+        name: _run_curve_for_params(df, params)
+        for name, params in LEGACY_COMPARE_VARIANTS.items()
+    }
+    metrics: dict[str, Any] = {}
+    for window_name, (start, raw_end) in LEGACY_COMPARE_WINDOWS.items():
+        window_start = rolling_start if start == "ROLLING_15" else start
+        window_end = latest if raw_end is None else min(raw_end, latest)
+        metrics[window_name] = {
+            name: _legacy_compare_metric(equity, trades, window_start, window_end)
+            for name, (equity, trades) in runs.items()
+        }
+        current = metrics[window_name]["baseline_directional"]
+        legacy = metrics[window_name]["legacy_local_t"]
+        metrics[window_name]["directional_minus_legacy"] = {
+            "return_edge": round(current["strategy_return"] - legacy["strategy_return"], 8),
+            "alpha_edge": round(current["alpha_return"] - legacy["alpha_return"], 8),
+            "drawdown_delta": round(current["max_drawdown"] - legacy["max_drawdown"], 8),
+            "trade_count_delta": current["trade_count"] - legacy["trade_count"],
+            "local_trade_count_delta": current["local_trade_count"] - legacy["local_trade_count"],
+        }
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "legacy_compare.json"
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "policy": {
+            "uses_future_data_for_signals": False,
+            "production_scan_findings": int(len(scan)),
+            "comparison": "baseline_directional_vs_legacy_local_t",
+        },
+        "latest_date": latest,
+        "rolling_15_start": rolling_start,
+        "data_warnings": bundle.warnings,
+        "metrics": metrics,
+    }
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"legacy_compare": str(output_path)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description="Run anti-overfit walk-forward validation for V6 variants.")
     parser.add_argument("--folds", default="mar,apr,may,jun", help="Comma list: mar,apr,may,jun or full fold names.")
     parser.add_argument(
         "--variants",
-        default="baseline,no_local_t,cooldown_60,candidate_short_refill_lock",
+        default="baseline,no_local_t,legacy_local_t,legacy_refill_lock,cooldown_60",
         help="Comma list of fixed variants.",
     )
     parser.add_argument("--slippage", default="1,2,3,5", help="Comma list of fallback slippage ticks.")
     parser.add_argument("--data-dir", default=str(DATA_DIR))
     parser.add_argument("--output-dir", default=str(Path(PROJECT_ROOT) / "qmt" / "analysis" / f"anti_overfit_{stamp}"))
+    parser.add_argument(
+        "--legacy-compare-only",
+        action="store_true",
+        help="Run a lightweight current directional-T vs legacy local-T comparison and write legacy_compare.json.",
+    )
     parser.add_argument(
         "--allow-production-scan-findings",
         action="store_true",
@@ -978,6 +1146,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.legacy_compare_only:
+        outputs = run_legacy_compare(args)
+        print(f"legacy_compare={outputs['legacy_compare']}")
+        return
     outputs = run_validation(args)
     print(f"validation_metrics={outputs['validation_metrics']}")
     print(f"gate_summary={outputs['gate_summary']}")

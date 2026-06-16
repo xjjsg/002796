@@ -211,8 +211,8 @@ class IntradayFactorCalc:
         self.last_raw_vol = 0.0
         self.last_raw_amt = 0.0
         self.open_price = open_price if open_price > 0 else current_price
-        self.intraday_high = max(current_price, intraday_high if intraday_high > 0 else current_price)
-        self.intraday_low = min(current_price, intraday_low if intraday_low > 0 else current_price)
+        self.intraday_high = current_price
+        self.intraday_low = current_price
         self.sample_count = 0
         self.below_vwap_count = 0
         self.below_vwap_seconds = 0.0
@@ -230,8 +230,6 @@ class IntradayFactorCalc:
         raw_amt = float(tick.get("Amount", tick.get("cum_amount", 0.0)) or 0.0)
         prev_close = float(tick.get("prev_close", 0.0) or 0.0)
         open_price = float(tick.get("open", 0.0) or 0.0)
-        day_high = float(tick.get("high", tick.get("High", 0.0)) or 0.0)
-        day_low = float(tick.get("low", tick.get("Low", 0.0)) or 0.0)
         dt = parse_dt(tick.get("Time", tick.get("timestamp", tick.get("dt"))))
         has_timestamp = dt is not None
         if dt is None:
@@ -240,7 +238,7 @@ class IntradayFactorCalc:
         history_dt = self._trading_clock_dt(dt) if has_timestamp else dt
 
         if is_new_day:
-            self.reset(prev_close, current_price, open_price, day_high, day_low)
+            self.reset(prev_close, current_price, open_price)
 
         elapsed_seconds = 0.0
         if self.last_history_dt is not None:
@@ -278,8 +276,8 @@ class IntradayFactorCalc:
         self.vwap = self.cum_amt / self.cum_vol if self.cum_vol > 0 else current_price
         prev_intraday_high = self.intraday_high
         prev_intraday_low = self.intraday_low
-        self.intraday_high = max(self.intraday_high, current_price, day_high if day_high > 0 else current_price)
-        self.intraday_low = min(self.intraday_low, current_price, day_low if day_low > 0 else current_price)
+        self.intraday_high = max(self.intraday_high, current_price)
+        self.intraday_low = min(self.intraday_low, current_price)
         if time_str <= "10:00:00":
             self.opening_range_high = max(self.opening_range_high, current_price)
             self.opening_range_low = min(self.opening_range_low, current_price)
