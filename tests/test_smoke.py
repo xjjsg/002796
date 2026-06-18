@@ -51,6 +51,7 @@ from qmt.anti_overfit_validation import (
     ValidationFold,
     build_parser,
     floor_refill_conflicts,
+    _trim_incomplete_tail_days,
 )
 
 
@@ -430,6 +431,51 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("rolling_latest_15", LEGACY_COMPARE_WINDOWS)
         args = build_parser().parse_args(["--legacy-compare-only"])
         self.assertTrue(args.legacy_compare_only)
+
+    def test_anti_overfit_trims_only_trailing_incomplete_days(self):
+        rows = []
+        for i in range(99):
+            rows.append(
+                {
+                    "date": "2026-06-17",
+                    "dt": datetime(2026, 6, 17, 9, 30) + timedelta(minutes=i),
+                    "price": 10.0,
+                }
+            )
+        rows.append({"date": "2026-06-17", "dt": datetime(2026, 6, 17, 14, 55), "price": 10.0})
+        rows.append({"date": "2026-06-18", "dt": datetime(2026, 6, 18, 9, 24, 57), "price": 10.0})
+        rows.append({"date": "2026-06-18", "dt": datetime(2026, 6, 18, 9, 25, 0), "price": 10.0})
+
+        trimmed, excluded = _trim_incomplete_tail_days(pd.DataFrame(rows))
+
+        self.assertEqual(excluded, ["2026-06-18"])
+        self.assertEqual(set(trimmed["date"]), {"2026-06-17"})
+
+    def test_anti_overfit_keeps_complete_latest_day(self):
+        rows = []
+        for i in range(99):
+            rows.append(
+                {
+                    "date": "2026-06-17",
+                    "dt": datetime(2026, 6, 17, 9, 30) + timedelta(minutes=i),
+                    "price": 10.0,
+                }
+            )
+        rows.append({"date": "2026-06-17", "dt": datetime(2026, 6, 17, 14, 55), "price": 10.0})
+        for i in range(99):
+            rows.append(
+                {
+                    "date": "2026-06-18",
+                    "dt": datetime(2026, 6, 18, 9, 30) + timedelta(minutes=i),
+                    "price": 10.0,
+                }
+            )
+        rows.append({"date": "2026-06-18", "dt": datetime(2026, 6, 18, 14, 55), "price": 10.0})
+
+        trimmed, excluded = _trim_incomplete_tail_days(pd.DataFrame(rows))
+
+        self.assertEqual(excluded, [])
+        self.assertEqual(set(trimmed["date"]), {"2026-06-17", "2026-06-18"})
 
     def test_floor_refill_conflicts_counts_directional_short_entry(self):
         fold = ValidationFold("unit", "2026-06-01", "2026-06-01", "2026-06-01", "2026-06-01")

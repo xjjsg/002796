@@ -21,9 +21,14 @@ data/*/*_strategy_trades.csv
 build/
 dist/
 *.spec.log
+*.spec
 
 # Large generated research datasets
 analysis/**/*.csv
+qmt/analysis/
+qmt/backtest_records/
+qmt/live_records/
+data/*_backup_*/
 
 # Editor and OS noise
 .idea/

@@ -1,4 +1,4 @@
-"""Configuration for QMT-based V6 backtests."""
+"""Configuration for QMT-based V6 backtests and live sync."""
 from __future__ import annotations
 
 import os
@@ -9,34 +9,21 @@ from sz002796.config import INITIAL_CAPITAL, INITIAL_STRATEGY_TARGET_PCT
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QMT_DIR = PROJECT_ROOT / "qmt"
-LEGACY_NEW_CONFIG = PROJECT_ROOT / "new" / "config.py"
-
-
-def _load_legacy_new_config() -> dict[str, str]:
-    if not LEGACY_NEW_CONFIG.exists():
-        return {}
-    namespace: dict[str, object] = {}
-    try:
-        exec(LEGACY_NEW_CONFIG.read_text(encoding="utf-8"), {}, namespace)
-    except Exception:
-        return {}
-    return {key: str(value) for key, value in namespace.items() if key.isupper()}
 
 
 def _usable_account_id(value: str | None) -> str:
     text = str(value or "").strip()
-    placeholders = {"", "你的资金账号", "YOUR_ACCOUNT_ID", "your_account_id"}
+    placeholders = {
+        "",
+        "你的资金账号",
+        "YOUR_ACCOUNT_ID",
+        "your_account_id",
+    }
     return "" if text in placeholders else text
 
 
-LEGACY_CONFIG = _load_legacy_new_config()
-LEGACY_ACCOUNT_ID = _usable_account_id(LEGACY_CONFIG.get("ACCOUNT_ID"))
-LEGACY_MINI_QMT_PATH = LEGACY_CONFIG.get("MINI_QMT_PATH", "")
-
 QMT_INSTALL_DIR = Path(os.environ.get("QMT_INSTALL_DIR", r"D:\国金QMT交易端模拟"))
-MINI_QMT_PATH = Path(
-    os.environ.get("MINI_QMT_PATH", LEGACY_MINI_QMT_PATH or str(QMT_INSTALL_DIR / "userdata_mini"))
-)
+MINI_QMT_PATH = Path(os.environ.get("MINI_QMT_PATH", str(QMT_INSTALL_DIR / "userdata_mini")))
 XTQUANT_SITE_PACKAGES = Path(
     os.environ.get(
         "XTQUANT_SITE_PACKAGES",
@@ -44,10 +31,10 @@ XTQUANT_SITE_PACKAGES = Path(
     )
 )
 
-TARGET_SYMBOL = os.environ.get("QMT_TARGET_SYMBOL", LEGACY_CONFIG.get("TARGET_SYMBOL", "002796.SZ"))
+TARGET_SYMBOL = os.environ.get("QMT_TARGET_SYMBOL", "002796.SZ")
 QMT_SIM_ACCOUNT = os.environ.get("QMT_SIM_ACCOUNT", "99005544")
 QMT_BACKTEST_ACCOUNT = os.environ.get("QMT_BACKTEST_ACCOUNT", "testS")
-ACCOUNT_ID = _usable_account_id(os.environ.get("QMT_ACCOUNT_ID", LEGACY_ACCOUNT_ID)) or QMT_SIM_ACCOUNT
+ACCOUNT_ID = _usable_account_id(os.environ.get("QMT_ACCOUNT_ID")) or QMT_SIM_ACCOUNT
 
 START_TIME = os.environ.get("QMT_BACKTEST_START_TIME", "20260105")
 END_TIME = os.environ.get("QMT_BACKTEST_END_TIME", "")

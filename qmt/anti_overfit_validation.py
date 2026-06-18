@@ -90,6 +90,9 @@ LEGACY_COMPARE_WINDOWS: dict[str, tuple[str | None, str | None]] = {
     "rolling_latest_15": ("ROLLING_15", None),
 }
 
+COMPLETE_DAY_MIN_ROWS = 100
+COMPLETE_DAY_MIN_LAST_TIME = "14:50:00"
+
 PRODUCTION_SCAN_FILES = [
     "sz002796/strategy_v6.py",
     "sz002796/factors.py",
@@ -200,10 +203,45 @@ def _source_segment_by_day(df: pd.DataFrame) -> dict[str, str]:
     return result
 
 
+def _day_last_time(day: pd.DataFrame) -> str:
+    if "dt" not in day.columns or day.empty:
+        return ""
+    timestamps = pd.to_datetime(day["dt"], errors="coerce").dropna()
+    if timestamps.empty:
+        return ""
+    return timestamps.max().strftime("%H:%M:%S")
+
+
+def _is_complete_trading_day(day: pd.DataFrame) -> bool:
+    return len(day) >= COMPLETE_DAY_MIN_ROWS and _day_last_time(day) >= COMPLETE_DAY_MIN_LAST_TIME
+
+
+def _trim_incomplete_tail_days(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Drop only trailing incomplete dates so latest-window research uses closed sessions."""
+    if df.empty or "date" not in df.columns:
+        return df.copy(), []
+    working = df.copy()
+    working["date"] = working["date"].astype(str)
+    dates = list(working["date"].drop_duplicates())
+    latest_complete: str | None = None
+    for date in reversed(dates):
+        day = working.loc[working["date"] == date]
+        if _is_complete_trading_day(day):
+            latest_complete = date
+            break
+    if latest_complete is None:
+        raise ValueError("no complete trading day found in data frame")
+    excluded = [date for date in dates if date > latest_complete]
+    if not excluded:
+        return working, []
+    return working.loc[working["date"] <= latest_complete].copy(), excluded
+
+
 def _prepare_frame(data_dir: str | Path, start_date: str, end_date: str) -> pd.DataFrame:
     bundle = load_market_data(start_date=start_date, end_date=end_date, data_dir=data_dir)
     df = bundle.frame.copy()
     df["date"] = df["date"].astype(str)
+    df, _ = _trim_incomplete_tail_days(df)
     df["month"] = df["date"].str.slice(0, 7)
     df["source_segment"] = df["date"].map(_source_segment_by_day(df))
     return df
@@ -1074,6 +1112,7 @@ def run_legacy_compare(args: argparse.Namespace) -> dict[str, str]:
     bundle = load_market_data(start_date=START_DATE, data_dir=args.data_dir)
     df = bundle.frame.copy()
     df["date"] = df["date"].astype(str)
+    df, excluded_incomplete_dates = _trim_incomplete_tail_days(df)
     latest = str(df.iloc[-1]["date"])
     unique_dates = list(df["date"].drop_duplicates())
     rolling_start = unique_dates[-15] if len(unique_dates) >= 15 else unique_dates[0]
@@ -1112,6 +1151,7 @@ def run_legacy_compare(args: argparse.Namespace) -> dict[str, str]:
         },
         "latest_date": latest,
         "rolling_15_start": rolling_start,
+        "excluded_incomplete_dates": excluded_incomplete_dates,
         "data_warnings": bundle.warnings,
         "metrics": metrics,
     }
