@@ -26,10 +26,9 @@ from sz002796.realtime_sources import (
     QmtMarketDataSource,
     RealtimeMarketSource,
     create_market_data_source,
-    gui_symbol_to_qmt_symbol,
     normalize_market_source_id,
+    symbol_to_qmt_symbol,
 )
-from sz002796.gui import TickChartBuffer
 from sz002796.regime import MarketRegime, MarketRegimeDecision, MarketRegimeEngine
 from sz002796.backtest import (
     BENCHMARK_TARGET_PCT,
@@ -116,7 +115,7 @@ class SmokeTests(unittest.TestCase):
     def test_realtime_source_selection_and_symbol_mapping(self):
         self.assertEqual(normalize_market_source_id("QMT"), "qmt")
         self.assertEqual(normalize_market_source_id("现有接口"), "tencent")
-        self.assertEqual(gui_symbol_to_qmt_symbol("sz002796"), "002796.SZ")
+        self.assertEqual(symbol_to_qmt_symbol("sz002796"), "002796.SZ")
         self.assertEqual(create_market_data_source("现有接口", "sz002796").source_id, "tencent")
 
     def test_qmt_market_source_drains_to_latest_tick(self):
@@ -334,25 +333,6 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("无有效 tick", events[0])
         self.assertEqual(tick["market_source"], "tencent")
         self.assertTrue(tick["market_source_fallback"])
-
-    def test_tick_chart_buffer_caps_points_and_handles_flat_prices(self):
-        chart = TickChartBuffer(max_points=3)
-        for idx in range(5):
-            chart.append(
-                {
-                    "Time": datetime(2026, 6, 10, 9, 30, idx),
-                    "server_time": f"09:30:0{idx}",
-                    "price": 10.0,
-                }
-            )
-
-        low, high = chart.price_bounds()
-        scaled = chart.scaled_points(320, 180)
-
-        self.assertEqual(len(chart.points), 3)
-        self.assertLess(low, high)
-        self.assertEqual(len(scaled), 3)
-        self.assertTrue(all(0 <= x <= 320 and 0 <= y <= 180 for x, y in scaled))
 
     def test_local_vwap_uses_time_window_for_minute_data(self):
         calc = IntradayFactorCalc(local_window=30)

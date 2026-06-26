@@ -1,6 +1,6 @@
 """Realtime tick CSV writer.
 
-Each trading day is written to a separate 30-column CSV file. When the GUI
+Each trading day is written to a separate 30-column CSV file. When the runtime
 restarts, the writer reads the existing file's latest server_time and skips
 stale or duplicate snapshots instead of appending old data again.
 """

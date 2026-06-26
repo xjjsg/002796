@@ -1,4 +1,4 @@
-"""Realtime market-data source adapters for the GUI."""
+"""Realtime market-data source adapters for the web runtime."""
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +45,7 @@ def market_source_label(source_id: str) -> str:
     return option.label if option else str(source_id)
 
 
-def gui_symbol_to_qmt_symbol(symbol: str) -> str:
+def symbol_to_qmt_symbol(symbol: str) -> str:
     text = str(symbol or "").strip()
     upper = text.upper()
     if upper.endswith((".SZ", ".SH")):
@@ -147,7 +147,7 @@ class QmtMarketDataSource(RealtimeMarketSource):
         feed_factory: Callable[[str], Any] | None = None,
         queue_timeout_seconds: float = 0.2,
     ):
-        self.symbol = gui_symbol_to_qmt_symbol(symbol)
+        self.symbol = symbol_to_qmt_symbol(symbol)
         self.feed = feed
         self.feed_factory = feed_factory
         self.queue_timeout_seconds = queue_timeout_seconds

@@ -2,7 +2,7 @@
 
 The strategy decides whether to trade; this module handles the exchange-facing
 constraints: lot alignment, minimum commission, stamp duty, and limit-up/down
-blocking. Backtest and GUI state replay both use these functions.
+blocking. Backtest and runtime state replay both use these functions.
 """
 from __future__ import annotations
 

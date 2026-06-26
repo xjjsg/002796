@@ -2,7 +2,7 @@
 
 This module is the only place that defines project paths, trading-cost
 constants, position anchors, and common date helpers. Keeping these values here
-prevents GUI, backtest, and strategy code from drifting apart.
+prevents web runtime, backtest, and strategy code from drifting apart.
 """
 import os
 from pathlib import Path
@@ -38,7 +38,7 @@ BACKTEST_TRADE_LOG_FILE = os.path.join(BACKTEST_RECORD_DIR, "trades.csv")
 FETCH_INTERVAL = 3.0
 STATE_SAVE_INTERVAL = 60.0
 LOCAL_T0_ENTER_SCORE = 0.80
-GUI_MARKET_SOURCE = os.environ.get("GUI_MARKET_SOURCE", "tencent")
+WEB_MARKET_SOURCE = os.environ.get("WEB_MARKET_SOURCE", "tencent")
 
 # --- Backtest Configuration ---
 INITIAL_CAPITAL = 1_000_000.0

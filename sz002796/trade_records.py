@@ -1,9 +1,9 @@
 """Unified trade-record schema and replay helpers.
 
-Backtests and the realtime GUI both write CSV trade ledgers.  This module keeps
+Backtests and the realtime runtime both write CSV trade ledgers.  This module keeps
 their column order, legacy aliases, and cash/share replay rules in one place so
-the GUI can consume backtest trades directly and append realtime trades without
-changing accounting semantics.
+the web runtime can consume backtest trades directly and append realtime trades
+without changing accounting semantics.
 """
 from __future__ import annotations
 

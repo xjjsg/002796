@@ -1,4 +1,4 @@
-"""Runtime state persistence and position replay for the GUI.
+"""Runtime state persistence and position replay for the web runtime.
 
 Cash and shares are not trusted from manual configuration. On startup the store
 replays the V6 backtest trade log plus any runtime trade log, then writes a

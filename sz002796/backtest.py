@@ -1,9 +1,9 @@
 """V6 historical backtest engine.
 
-The backtest is intentionally independent from GUI runtime state. It starts the
+The backtest is intentionally independent from realtime runtime state. It starts the
 strategy with 1,000,000 cash, seeds a 70% base position on the first available
 row, replays normalized market data, and writes deterministic trade and summary
-outputs for GUI position replay and performance review.
+outputs for web position replay and performance review.
 """
 from __future__ import annotations
 
