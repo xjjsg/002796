@@ -673,6 +673,173 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(loaded["position_replay"]["seed_rows"], 1)
         self.assertEqual(loaded["position_replay"]["runtime_rows"], 1)
 
+    def test_strategy_state_ignores_runtime_rows_covered_by_backtest_seed(self):
+        tmp = Path(tempfile.mkdtemp())
+        state_path = tmp / "state.json"
+        runtime_trade_path = tmp / "runtime_trades.csv"
+        backtest_trade_path = tmp / "backtest_trades.csv"
+
+        with backtest_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-25 10:00:00",
+                    "source": "backtest",
+                    "side": "BUY",
+                    "price": 10.0,
+                    "shares": 100,
+                    "target_pct": 0.10,
+                    "mode": "DEFENSE",
+                    "reason": "seed buy",
+                    "detail": "seed window",
+                }
+            )
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-25 10:40:00",
+                    "source": "backtest",
+                    "side": "SELL",
+                    "price": 12.0,
+                    "shares": 100,
+                    "target_pct": 0.0,
+                    "mode": "DEFENSE",
+                    "reason": "seed sell",
+                    "detail": "seed window",
+                }
+            )
+
+        with runtime_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-25 10:20:00",
+                    "source": "runtime",
+                    "side": "BUY",
+                    "price": 11.0,
+                    "shares": 100,
+                    "target_pct": 0.20,
+                    "mode": "DEFENSE",
+                    "reason": "covered runtime",
+                    "detail": "inside seed window",
+                }
+            )
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-25 10:50:00",
+                    "source": "runtime",
+                    "side": "BUY",
+                    "price": 13.0,
+                    "shares": 100,
+                    "target_pct": 0.10,
+                    "mode": "DEFENSE",
+                    "reason": "incremental runtime",
+                    "detail": "after seed window",
+                }
+            )
+
+        store = StrategyStateStore(
+            str(state_path),
+            str(runtime_trade_path),
+            seed_trade_log_path=str(backtest_trade_path),
+            seed_cash=1_000_000.0,
+            seed_shares=0,
+            seed_target_pct=0.0,
+        )
+        restored = CombinedStrategyV6(initial_capital=INITIAL_CAPITAL)
+        loaded = store.load(restored)
+
+        self.assertEqual(restored.shares, 100)
+        self.assertAlmostEqual(restored.cash, 998884.4)
+        self.assertEqual(loaded["position_replay"]["source"], "backtest+runtime")
+        self.assertEqual(loaded["position_replay"]["seed_rows"], 2)
+        self.assertEqual(loaded["position_replay"]["runtime_rows"], 1)
+        self.assertEqual(loaded["position_replay"]["runtime_rows_total"], 2)
+        self.assertEqual(loaded["position_replay"]["ignored_runtime_rows_in_seed_window"], 1)
+        self.assertEqual(loaded["position_replay"]["replayed_count"], 3)
+
+    def test_strategy_state_uses_backtest_summary_end_time_as_seed_window(self):
+        tmp = Path(tempfile.mkdtemp())
+        state_path = tmp / "state.json"
+        runtime_trade_path = tmp / "runtime_trades.csv"
+        backtest_trade_path = tmp / "trades.csv"
+        summary_path = tmp / "summary.json"
+
+        with backtest_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-25 10:00:00",
+                    "source": "backtest",
+                    "side": "BUY",
+                    "price": 10.0,
+                    "shares": 100,
+                    "target_pct": 0.10,
+                    "mode": "DEFENSE",
+                    "reason": "seed buy",
+                    "detail": "last trade before coverage end",
+                }
+            )
+        summary_path.write_text(
+            json.dumps({"end_time": "2026-06-26 15:00:00"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with runtime_trade_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-26 10:00:00",
+                    "source": "runtime",
+                    "side": "SELL",
+                    "price": 12.0,
+                    "shares": 100,
+                    "target_pct": 0.0,
+                    "mode": "DEFENSE",
+                    "reason": "covered runtime",
+                    "detail": "covered by summary window",
+                }
+            )
+            writer.writerow(
+                {
+                    "timestamp": "2026-06-29 10:00:00",
+                    "source": "runtime",
+                    "side": "SELL",
+                    "price": 11.0,
+                    "shares": 100,
+                    "target_pct": 0.0,
+                    "mode": "DEFENSE",
+                    "reason": "new runtime",
+                    "detail": "after summary window",
+                }
+            )
+
+        store = StrategyStateStore(
+            str(state_path),
+            str(runtime_trade_path),
+            seed_trade_log_path=str(backtest_trade_path),
+            seed_cash=1_000_000.0,
+            seed_shares=0,
+            seed_target_pct=0.0,
+        )
+        restored = CombinedStrategyV6(initial_capital=INITIAL_CAPITAL)
+        loaded = store.load(restored)
+
+        self.assertEqual(restored.shares, 0)
+        self.assertAlmostEqual(restored.cash, 1_000_000.0 - 1005.0 + 1094.45)
+        self.assertEqual(loaded["position_replay"]["source"], "backtest+runtime")
+        self.assertEqual(loaded["position_replay"]["seed_rows"], 1)
+        self.assertEqual(loaded["position_replay"]["runtime_rows"], 1)
+        self.assertEqual(loaded["position_replay"]["runtime_rows_total"], 2)
+        self.assertEqual(loaded["position_replay"]["ignored_runtime_rows_in_seed_window"], 1)
+        self.assertEqual(loaded["position_replay"]["seed_last_timestamp"], "2026-06-25 10:00:00")
+        self.assertEqual(loaded["position_replay"]["seed_coverage_end"], "2026-06-26 15:00:00")
+        self.assertEqual(loaded["position_replay"]["seed_coverage_source"], "summary")
+        self.assertEqual(loaded["position_replay"]["replayed_count"], 2)
+
     def test_mismatched_state_is_ignored(self):
         tmp = Path(tempfile.mkdtemp())
         state_path = tmp / "state.json"

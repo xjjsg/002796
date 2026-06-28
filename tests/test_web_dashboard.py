@@ -108,12 +108,59 @@ class WebDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot["orderbook"]["asks"][-1]["price"], 50.01)
         self.assertEqual(snapshot["trade"]["reason"], "主力流出保护")
 
+    def test_high_score_signal_is_blocked_when_execution_conditions_do_not_match(self):
+        strategy = CombinedStrategyV6(initial_capital=1_000_000)
+        strategy.cash = 500_000
+        strategy.shares = 10_000
+        strategy.target_pct = 0.50
+        strategy.current_date = "2026-06-26"
+        strategy.regime_decision = MarketRegimeDecision(
+            regime=MarketRegime.RANGE,
+            tags=("test",),
+            confidence=0.8,
+            target_floor_pct=0.40,
+            target_ceiling_pct=1.00,
+            regime_score=0.1,
+            detail="震荡区间",
+        )
+        strategy.factor_calc.last_snapshot = FactorSnapshot(
+            price=39.5,
+            vwap=40.8,
+            day_vwap_dev=-0.032,
+            local_vwap=40.2,
+            local_vwap_dev=-0.017,
+            velocity=-0.004,
+            acceleration=-0.006,
+            vol_mom=1.4,
+            day_return=-0.06,
+            tick_vol=100,
+            tick_amt=3950,
+            pullback_from_high=-0.06,
+            range_position=0.1,
+        )
+        tick = {
+            "Time": datetime(2026, 6, 26, 10, 45, 0),
+            "price": 39.5,
+            "prev_close": 42.02,
+            "server_time": "10:45:00",
+        }
+
+        snapshot = build_dashboard_snapshot(tick, strategy)
+        main_flow = next(item for item in snapshot["signals"] if item["key"] == "main_flow")
+
+        self.assertGreaterEqual(main_flow["score"], main_flow["threshold"])
+        self.assertEqual(main_flow["state"], "blocked")
+        self.assertFalse(main_flow["executable"])
+        self.assertIn("仅上涨趋势", main_flow["reason"])
+        self.assertIn("高分但未执行", snapshot["decision"]["reason"])
+
     def test_web_app_exposes_dashboard_routes(self):
         paths = {route.resource.canonical for route in create_app().router.routes()}
         self.assertIn("/api/bootstrap", paths)
         self.assertIn("/api/runtime/start", paths)
         self.assertIn("/api/runtime/stop", paths)
         self.assertIn("/api/trades", paths)
+        self.assertIn("/api/backtest/run", paths)
         self.assertIn("/ws", paths)
 
 

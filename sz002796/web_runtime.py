@@ -14,6 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .backtest import run_backtest as execute_backtest
 from .config import (
     BACKTEST_RECORD_DIR,
     BACKTEST_TRADE_LOG_FILE,
@@ -28,7 +29,7 @@ from .config import (
 from .dashboard import trade_row_to_payload
 from .live_engine import worker_thread
 from .realtime_sources import MARKET_SOURCE_OPTIONS, normalize_market_source_id
-from .trade_records import read_trade_rows, trade_identity
+from .trade_records import merge_seed_and_runtime_trade_rows, read_trade_rows
 
 
 DATA_FILE_RE = re.compile(r"^sz002796-(\d{4}-\d{2}-\d{2})\.csv$")
@@ -45,21 +46,30 @@ def load_backtest_summary() -> dict[str, Any]:
     return data
 
 
+def _merged_trade_rows() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    seed_rows = [dict(row) for row in read_trade_rows(BACKTEST_TRADE_LOG_FILE)]
+    runtime_rows_all = [dict(row) for row in read_trade_rows(TRADE_LOG_FILE)]
+    for row in seed_rows:
+        row["source"] = row.get("source") or "backtest"
+    for row in runtime_rows_all:
+        row["source"] = row.get("source") or "runtime"
+
+    rows, info = merge_seed_and_runtime_trade_rows(seed_rows, runtime_rows_all, BACKTEST_TRADE_LOG_FILE)
+
+    return rows, {
+        "seedRows": info.get("seed_rows", 0),
+        "runtimeRows": info.get("runtime_rows", 0),
+        "runtimeRowsTotal": info.get("runtime_rows_total", 0),
+        "ignoredRuntimeRowsInSeedWindow": info.get("ignored_runtime_rows_in_seed_window", 0),
+        "seedLastTimestamp": info.get("seed_last_timestamp") or "",
+        "seedCoverageEnd": info.get("seed_coverage_end") or "",
+        "seedCoverageSource": info.get("seed_coverage_source") or "none",
+        "duplicateRows": info.get("duplicate_rows", 0),
+    }
+
+
 def load_trade_history(limit: int = 200) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, str, str]] = set()
-    for path, source in (
-        (BACKTEST_TRADE_LOG_FILE, "backtest"),
-        (TRADE_LOG_FILE, "runtime"),
-    ):
-        for original in read_trade_rows(path):
-            row = dict(original)
-            row["source"] = row.get("source") or source
-            key = trade_identity(row)
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(row)
+    rows, _ = _merged_trade_rows()
 
     rows.sort(key=lambda item: parse_dt(item.get("timestamp")) or datetime.min, reverse=True)
     return [trade_row_to_payload(row) for row in rows[: max(1, int(limit))]]
@@ -87,6 +97,7 @@ def load_data_status() -> dict[str, Any]:
             else ""
         ),
         "knownWarnings": summary.get("known_data_quality_warnings", []),
+        "tradeReplay": _merged_trade_rows()[1],
         "runtimeStateExists": (root / f"{SYMBOL_CODE}_v6_strategy_state.json").exists(),
         "runtimeTradesExists": Path(TRADE_LOG_FILE).exists(),
     }
@@ -96,17 +107,34 @@ def build_idle_snapshot() -> dict[str, Any]:
     summary = load_backtest_summary()
     trades = load_trade_history(limit=1)
     latest_trade = trades[0] if trades else None
+    use_runtime_trade = latest_trade is not None and latest_trade.get("source") == "runtime"
     price = float(latest_trade.get("price", 0.0) if latest_trade else 0.0)
-    if latest_trade:
+    if summary.get("available") and not use_runtime_trade:
+        equity = float(summary.get("strategy_final_asset", INITIAL_CAPITAL) or INITIAL_CAPITAL)
+        cash = float(summary.get("final_cash", INITIAL_CAPITAL) or INITIAL_CAPITAL)
+        shares = int(summary.get("final_shares", 0) or 0)
+        position_pct = float(summary.get("final_position_pct", 0.0) or 0.0)
+        if shares > 0:
+            price = max(0.0, (equity - cash) / shares)
+        target_pct = float(latest_trade.get("targetPct", position_pct) if latest_trade else position_pct)
+        mode = str(latest_trade.get("mode", "NEUTRAL") if latest_trade else "NEUTRAL")
+        last_trade_time = str(latest_trade.get("timestamp", "") if latest_trade else "")
+    elif latest_trade:
         cash = float(latest_trade.get("cashAfter", 0.0) or 0.0)
         shares = int(latest_trade.get("positionShares", 0) or 0)
         equity = cash + shares * price
         position_pct = float(latest_trade.get("positionAfter", 0.0) or 0.0)
+        target_pct = float(latest_trade.get("targetPct", position_pct))
+        mode = str(latest_trade.get("mode", "NEUTRAL"))
+        last_trade_time = str(latest_trade.get("timestamp", ""))
     else:
         equity = float(summary.get("strategy_final_asset", INITIAL_CAPITAL) or INITIAL_CAPITAL)
         cash = float(summary.get("final_cash", INITIAL_CAPITAL) or INITIAL_CAPITAL)
         shares = int(summary.get("final_shares", 0) or 0)
         position_pct = float(summary.get("final_position_pct", 0.0) or 0.0)
+        target_pct = position_pct
+        mode = "NEUTRAL"
+        last_trade_time = ""
     return {
         "type": "snapshot",
         "status": "IDLE",
@@ -137,13 +165,13 @@ def build_idle_snapshot() -> dict[str, Any]:
             "pnl": equity - INITIAL_CAPITAL,
             "pnlPct": equity / INITIAL_CAPITAL - 1.0,
             "positionPct": position_pct,
-            "targetPct": float(latest_trade.get("targetPct", position_pct) if latest_trade else position_pct),
+            "targetPct": target_pct,
             "floorPct": 0.40,
             "ceilingPct": 1.00,
-            "mode": str(latest_trade.get("mode", "NEUTRAL") if latest_trade else "NEUTRAL"),
+            "mode": mode,
             "dayTradeCount": 0,
             "maxDayTrades": 5,
-            "lastTradeTime": str(latest_trade.get("timestamp", "") if latest_trade else ""),
+            "lastTradeTime": last_trade_time,
             "localCycle": "none",
             "localBasePct": None,
             "localEntryPrice": None,
@@ -190,6 +218,7 @@ class DashboardRuntime:
         self.chart: deque[dict[str, Any]] = deque(maxlen=360)
         self.clients: set[web.WebSocketResponse] = set()
         self._pump_task: asyncio.Task | None = None
+        self._backtest_running = False
 
     async def start(self) -> None:
         if self._pump_task is None:
@@ -273,6 +302,40 @@ class DashboardRuntime:
                 "backtestDirectory": BACKTEST_RECORD_DIR,
             },
         }
+
+    async def run_backtest_once(self) -> dict[str, Any]:
+        if self.is_running():
+            return {"ok": False, "error": "实时监控运行中，请先停止后再回测"}
+        if self._backtest_running:
+            return {"ok": False, "error": "回测正在运行"}
+
+        self._backtest_running = True
+        self.log_queue.put("[BACKTEST] 开始使用当前本地行情重新回测")
+        try:
+            summary = await asyncio.to_thread(execute_backtest)
+            summary = dict(summary)
+            summary["available"] = True
+            self.trades = deque(load_trade_history(limit=200), maxlen=200)
+            self.snapshot = build_idle_snapshot()
+            payload = {
+                "ok": True,
+                "backtest": summary,
+                "trades": list(self.trades),
+                "dataStatus": load_data_status(),
+                "snapshot": self.snapshot,
+            }
+            self.log_queue.put(
+                "[BACKTEST] 完成 "
+                f"rows={summary.get('data_rows', 0)} trades={summary.get('trade_count', 0)} "
+                f"end={summary.get('end_date', '-')}"
+            )
+            await self.broadcast({"type": "bootstrap", **self.bootstrap()})
+            return payload
+        except Exception as exc:
+            self.log_queue.put(f"[ERROR] 回测失败: {exc!r}")
+            return {"ok": False, "error": repr(exc)}
+        finally:
+            self._backtest_running = False
 
     async def register(self, client: web.WebSocketResponse) -> None:
         self.clients.add(client)

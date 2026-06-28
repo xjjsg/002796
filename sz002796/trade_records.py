@@ -8,8 +8,10 @@ without changing accounting semantics.
 from __future__ import annotations
 
 import csv
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .config import ANCHOR_PCT, INITIAL_CASH, INITIAL_SHARES, INITIAL_TARGET_PCT, LOT_SIZE, parse_dt
@@ -138,6 +140,107 @@ def trade_sort_key(item: tuple[int, dict[str, Any]]) -> tuple[datetime, int]:
     row = canonicalize_trade_row(row)
     timestamp = parse_dt(row.get("timestamp"))
     return timestamp or datetime.max, idx
+
+
+def trade_row_timestamp(row: dict[str, Any]) -> datetime | None:
+    row = canonicalize_trade_row(row)
+    return parse_dt(row.get("timestamp"))
+
+
+def latest_trade_timestamp(rows: list[dict[str, Any]]) -> datetime | None:
+    return max(
+        (dt for dt in (trade_row_timestamp(row) for row in rows) if dt is not None),
+        default=None,
+    )
+
+
+def backtest_summary_path_for_trade_log(path: str | None) -> Path | None:
+    if not path:
+        return None
+    return Path(path).with_name("summary.json")
+
+
+def read_backtest_coverage_end(path: str | None) -> datetime | None:
+    summary_path = backtest_summary_path_for_trade_log(path)
+    if summary_path is None or not summary_path.exists():
+        return None
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    end_time = parse_dt(summary.get("end_time"))
+    if end_time is not None:
+        return end_time
+
+    end_date = summary.get("end_date")
+    if end_date:
+        return parse_dt(f"{end_date} 15:00:00")
+    return None
+
+
+def seed_coverage_end(
+    seed_trade_log_path: str | None,
+    seed_rows: list[dict[str, Any]],
+) -> tuple[datetime | None, str, datetime | None]:
+    last_trade_at = latest_trade_timestamp(seed_rows)
+    summary_end = read_backtest_coverage_end(seed_trade_log_path)
+    if summary_end is not None and (last_trade_at is None or summary_end >= last_trade_at):
+        return summary_end, "summary", last_trade_at
+    if last_trade_at is not None:
+        return last_trade_at, "trades", last_trade_at
+    if summary_end is not None:
+        return summary_end, "summary", last_trade_at
+    return None, "none", last_trade_at
+
+
+def merge_seed_and_runtime_trade_rows(
+    seed_rows: list[dict[str, Any]],
+    runtime_rows_all: list[dict[str, Any]],
+    seed_trade_log_path: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    coverage_end, coverage_source, last_trade_at = seed_coverage_end(seed_trade_log_path, seed_rows)
+    runtime_rows: list[dict[str, Any]] = []
+    ignored_runtime_rows = 0
+    for row in runtime_rows_all:
+        runtime_dt = trade_row_timestamp(row)
+        if coverage_end is not None and runtime_dt is not None and runtime_dt <= coverage_end:
+            ignored_runtime_rows += 1
+            continue
+        runtime_rows.append(row)
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    duplicate_count = 0
+
+    for row in seed_rows + runtime_rows:
+        key = trade_identity(row)
+        if key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(key)
+        rows.append(row)
+
+    source = "none"
+    if seed_rows and runtime_rows:
+        source = "backtest+runtime"
+    elif seed_rows:
+        source = "backtest"
+    elif runtime_rows:
+        source = "runtime"
+
+    return rows, {
+        "source": source,
+        "seed_rows": len(seed_rows),
+        "runtime_rows": len(runtime_rows),
+        "runtime_rows_total": len(runtime_rows_all),
+        "ignored_runtime_rows_in_seed_window": ignored_runtime_rows,
+        "seed_last_timestamp": last_trade_at.isoformat(sep=" ") if last_trade_at else None,
+        "seed_coverage_end": coverage_end.isoformat(sep=" ") if coverage_end else None,
+        "seed_coverage_source": coverage_source,
+        "duplicate_rows": duplicate_count,
+    }
 
 
 def mode_from_target_pct(target_pct: float) -> PositionMode:

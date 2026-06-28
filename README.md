@@ -29,11 +29,12 @@
 | 路径 | 说明 |
 |------|------|
 | `run_web.py` | 启动 aiohttp + React 实时策略工作台。 |
+| `run_gui.py` | 兼容启动别名，转到新的 Web 工作台。 |
 | `run_backtest.py` | 启动默认历史回测。 |
 | `frontend/` | React/Vite 前端源码。 |
 | `sz002796/web_server.py` | HTTP、WebSocket 和静态资源服务。 |
 | `sz002796/web_runtime.py` | 可启停运行时、事件广播和工作台读模型。 |
-| `sz002796/live_engine.py` | Web 工作台使用的实时策略线程。 |
+| `sz002796/live_engine.py` | 桌面端与 Web 端共用的实时策略线程。 |
 | `sz002796/dashboard.py` | 策略对象到稳定 JSON 数据协议的转换层。 |
 | `sz002796/strategy_v6.py` | 当前 V6 策略状态机。 |
 | `sz002796/backtest.py` | 本地 CSV 回测引擎和模拟成交逻辑。 |
@@ -93,9 +94,15 @@ pnpm build
 pnpm dev
 ```
 
-## 运行时状态与行情源
+## 兼容启动入口
 
-运行引擎以 V6 模拟账户为仓位来源，并先回放：
+启动：
+
+```powershell
+python run_gui.py
+```
+
+该命令保留给旧脚本和快捷方式，实际启动的仍是 Web 工作台。运行引擎以 V6 模拟账户为仓位来源，并先回放：
 
 ```text
 backtest_records/v6_seed70_100w_2026-01-05_to_latest/trades.csv

@@ -45,6 +45,11 @@ async def get_backtest(request: web.Request) -> web.Response:
     return web.json_response(load_backtest_summary())
 
 
+async def run_backtest_now(request: web.Request) -> web.Response:
+    result = await request.app[RUNTIME_KEY].run_backtest_once()
+    return web.json_response(result, status=200 if result.get("ok") else 409)
+
+
 async def get_data_status(request: web.Request) -> web.Response:
     return web.json_response(load_data_status())
 
@@ -97,6 +102,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> web.Application:
     app.router.add_post("/api/runtime/stop", stop_runtime)
     app.router.add_get("/api/trades", get_trades)
     app.router.add_get("/api/backtest", get_backtest)
+    app.router.add_post("/api/backtest/run", run_backtest_now)
     app.router.add_get("/api/data-status", get_data_status)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/{path:.*}", spa_handler)

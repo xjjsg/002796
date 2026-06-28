@@ -122,6 +122,18 @@ function statusLabel(status) {
   return labels[status] || status;
 }
 
+function signalStateLabel(state) {
+  const labels = {
+    triggered: "可执行",
+    pending: "等待执行",
+    blocked: "条件未满足",
+    confirm: "辅助确认",
+    near: "接近触发",
+    watching: "持续观察",
+  };
+  return labels[state] || "持续观察";
+}
+
 function Sidebar({ page, setPage, open, setOpen }) {
   return (
     <>
@@ -355,11 +367,11 @@ function DecisionPanel({ snapshot }) {
       </div>
       <div className="signal-list">
         {signals.length ? signals.map((signal) => (
-          <div className="signal-row" key={signal.key}>
+          <div className={`signal-row signal-${signal.state}`} key={signal.key}>
             <div>
               <span className={`direction-mark ${signal.direction.toLowerCase()}`} />
               <strong>{signal.label}</strong>
-              <small>{signal.state === "triggered" ? "已达到阈值" : signal.state === "near" ? "接近触发" : "持续观察"}</small>
+              <small title={signal.reason || ""}>{signalStateLabel(signal.state)}</small>
             </div>
             <span>{signal.score.toFixed(2)} / {signal.threshold.toFixed(2)}</span>
             <div className="signal-progress"><i style={{ width: `${signal.progress * 100}%` }} /></div>
@@ -607,9 +619,31 @@ function MonitorPage({ snapshot, trades, logs }) {
   );
 }
 
-function BacktestPage({ backtest }) {
+function BacktestPage({ backtest, onRunBacktest, runBusy, runMessage, runtimeRunning }) {
+  const runDisabled = runBusy || runtimeRunning;
+  const statusMessage = runtimeRunning ? "实时监控运行中，请先停止后再回测" : runMessage;
+  const runButton = (
+    <button
+      className="button button-primary"
+      onClick={onRunBacktest}
+      disabled={runDisabled}
+      title={runtimeRunning ? "实时监控运行中，请先停止后再回测" : "使用当前本地行情重新回测"}
+    >
+      <RefreshCw size={16} className={runBusy ? "spin" : ""} />
+      {runBusy ? "回测中" : "重新回测"}
+    </button>
+  );
   if (!backtest?.available) {
-    return <main className="page"><div className="panel empty-page">没有找到回测汇总，请先运行 <code>python run_backtest.py</code>。</div></main>;
+    return (
+      <main className="page">
+        <div className="page-title">
+          <div><span className="section-kicker">BACKTEST</span><h2>回测分析</h2><p>当前没有可用的回测汇总</p></div>
+          <div className="page-actions">{runButton}</div>
+        </div>
+        {statusMessage && <div className="notice-bar"><RefreshCw size={16} />{statusMessage}</div>}
+        <div className="panel empty-page">没有找到回测汇总，请先运行一次回测。</div>
+      </main>
+    );
   }
   const comparisons = [
     { label: "V6 策略", value: backtest.strategy_return, color: "strategy" },
@@ -621,7 +655,11 @@ function BacktestPage({ backtest }) {
     <main className="page">
       <div className="page-title">
         <div><span className="section-kicker">BACKTEST</span><h2>回测分析</h2><p>{backtest.start_date} 至 {backtest.end_date}</p></div>
-        <span className="subtle-chip">{number(backtest.data_rows, 0)} 条数据 · {backtest.trade_count} 笔交易</span>
+        <div className="page-actions">
+          {statusMessage && <span className="run-state">{statusMessage}</span>}
+          <span className="subtle-chip">{number(backtest.data_rows, 0)} 条数据 · {backtest.trade_count} 笔交易</span>
+          {runButton}
+        </div>
       </div>
       <div className="summary-grid">
         <MetricCard label="策略收益" value={pct(backtest.strategy_return)} note={`最终资产 ${money(backtest.strategy_final_asset)}`} icon={TrendingUp} tone="positive" />
@@ -799,6 +837,8 @@ export default function App() {
   const [source, setSource] = useState("tencent");
   const [system, setSystem] = useState({});
   const [busy, setBusy] = useState(false);
+  const [backtestBusy, setBacktestBusy] = useState(false);
+  const [backtestMessage, setBacktestMessage] = useState("");
   const [wsConnected, setWsConnected] = useState(false);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -887,13 +927,46 @@ export default function App() {
     }
   };
 
+  const runBacktest = async () => {
+    setBacktestBusy(true);
+    setBacktestMessage("正在使用当前本地行情重新回测");
+    try {
+      const response = await fetch("/api/backtest/run", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || "回测失败");
+      }
+      setBacktest(payload.backtest || null);
+      setTrades(payload.trades || []);
+      setDataStatus(payload.dataStatus || null);
+      if (payload.snapshot) {
+        setSnapshot(payload.snapshot);
+      }
+      setBacktestMessage(`已刷新：${number(payload.backtest?.trade_count, 0)} 笔交易`);
+    } catch (error) {
+      setBacktestMessage(error?.message || "回测失败");
+    } finally {
+      setBacktestBusy(false);
+    }
+  };
+
   const pageContent = useMemo(() => {
-    if (page === "backtest") return <BacktestPage backtest={backtest} />;
+    if (page === "backtest") {
+      return (
+        <BacktestPage
+          backtest={backtest}
+          onRunBacktest={runBacktest}
+          runBusy={backtestBusy}
+          runMessage={backtestMessage}
+          runtimeRunning={runtime.running}
+        />
+      );
+    }
     if (page === "trades") return <TradesPage trades={trades} />;
     if (page === "data") return <DataPage dataStatus={dataStatus} />;
     if (page === "settings") return <SettingsPage system={system} sourceOptions={sourceOptions} source={source} setSource={setSource} runtime={runtime} />;
     return <MonitorPage snapshot={snapshot} trades={trades} logs={logs} />;
-  }, [page, backtest, trades, dataStatus, system, sourceOptions, source, runtime, snapshot, logs]);
+  }, [page, backtest, backtestBusy, backtestMessage, trades, dataStatus, system, sourceOptions, source, runtime, snapshot, logs]);
 
   return (
     <div className="app-shell">

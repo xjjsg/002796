@@ -12,14 +12,14 @@ from typing import Any
 
 from .config import (
     INITIAL_CASH, INITIAL_SHARES, INITIAL_TARGET_PCT, INITIAL_CAPITAL,
-    ANCHOR_PCT, LOT_SIZE, SYMBOL_CODE, BACKTEST_RECORD_DIR,
-    BACKTEST_TRADE_LOG_FILE, parse_dt
+    ANCHOR_PCT, LOT_SIZE, SYMBOL_CODE, BACKTEST_TRADE_LOG_FILE, parse_dt
 )
 from .position import PositionMode, TradeRecord
 from .trade_records import (
     TRADE_LOG_COLUMNS,
     apply_trade_row,
     ensure_trade_log_schema,
+    merge_seed_and_runtime_trade_rows,
     mode_from_target_pct,
     read_trade_rows,
     replay_trade_rows,
@@ -92,33 +92,8 @@ class StrategyStateStore:
 
     def _read_position_rows(self) -> tuple[list[dict], dict]:
         seed_rows = self._read_csv_rows(self.seed_trade_log_path) if self._seed_available() else []
-        runtime_rows = self._read_trade_rows()
-        rows: list[dict] = []
-        seen: set[tuple[str, str, str, str, str, str]] = set()
-        duplicate_count = 0
-
-        for row in seed_rows + runtime_rows:
-            key = self._trade_identity(row)
-            if key in seen:
-                duplicate_count += 1
-                continue
-            seen.add(key)
-            rows.append(row)
-
-        source = "none"
-        if seed_rows and runtime_rows:
-            source = "backtest+runtime"
-        elif seed_rows:
-            source = "backtest"
-        elif runtime_rows:
-            source = "runtime"
-
-        return rows, {
-            "source": source,
-            "seed_rows": len(seed_rows),
-            "runtime_rows": len(runtime_rows),
-            "duplicate_rows": duplicate_count,
-        }
+        runtime_rows_all = self._read_trade_rows()
+        return merge_seed_and_runtime_trade_rows(seed_rows, runtime_rows_all, self.seed_trade_log_path)
 
     def _ensure_trade_log_schema(self, required_fields: list[str]) -> list[str]:
         return ensure_trade_log_schema(self.trade_log_path, required_fields)
@@ -213,6 +188,11 @@ class StrategyStateStore:
             "asset_base": seed_asset_base,
             "seed_rows": source_info.get("seed_rows", 0),
             "runtime_rows": source_info.get("runtime_rows", 0),
+            "runtime_rows_total": source_info.get("runtime_rows_total", 0),
+            "ignored_runtime_rows_in_seed_window": source_info.get("ignored_runtime_rows_in_seed_window", 0),
+            "seed_last_timestamp": source_info.get("seed_last_timestamp"),
+            "seed_coverage_end": source_info.get("seed_coverage_end"),
+            "seed_coverage_source": source_info.get("seed_coverage_source"),
             "duplicate_rows": source_info.get("duplicate_rows", 0),
             "replayed_count": len(records),
             "warnings": warnings,

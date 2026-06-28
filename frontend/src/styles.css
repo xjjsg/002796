@@ -201,6 +201,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .signal-row > div:first-child { min-width: 0; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 7px; }
 .signal-row strong { color: #cad3dd; font-size: 11px; font-weight: 550; }
 .signal-row small { grid-column: 2; color: #667487; font-size: 9px; }
+.signal-row.signal-triggered small { color: #8eddbf; }
+.signal-row.signal-pending small { color: #9fbdec; }
+.signal-row.signal-blocked small { color: #d0b37e; }
+.signal-row.signal-confirm small { color: #90a3b9; }
 .signal-row > span { color: #9caabb; font-size: 10px; font-family: Consolas, monospace; }
 .direction-mark { width: 5px; height: 18px; border-radius: 2px; background: #536173; grid-row: 1 / span 2; }
 .direction-mark.buy { background: var(--red); }
@@ -286,6 +290,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .page-title { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .page-title h2 { font-size: 20px; }
 .page-title p { margin: 5px 0 0; color: #738195; font-size: 11px; }
+.page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+.run-state { color: #91a0b1; font-size: 11px; }
 .subtle-chip { padding: 6px 9px; color: #9aa8b8; background: #151e28; border: 1px solid #24303d; border-radius: 6px; font-size: 10px; }
 .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .two-column { display: grid; grid-template-columns: 1.35fr .8fr; gap: 10px; margin-top: 10px; }
